@@ -9,6 +9,8 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
+import http from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { detectSquadDir } from '../core/detect-squad-dir.js';
 import { fatal } from '../core/errors.js';
 import { GREEN, DIM, BOLD, RESET, YELLOW } from '../core/output.js';
@@ -80,28 +82,85 @@ export async function runServe(cwd: string, options: ServeOptions): Promise<void
     const eventBus = server.getEventBus();
     eventBus.subscribeAll(async (event: any) => {
       const ts = new Date().toLocaleTimeString();
+      const agent = event.agentName ? ` ${BOLD}${event.agentName}${RESET}` : '';
+
       switch (event.type) {
-        case 'session.created':
         case 'session:created':
-          console.log(`${GREEN}+${RESET} [${ts}] Session created: ${event.agentName || event.sessionId}`);
+        case 'session.created':
+          console.log(`${GREEN}+${RESET} [${ts}]${agent} session created`);
           break;
-        case 'session.destroyed':
         case 'session:destroyed':
-          console.log(`${DIM}-${RESET} [${ts}] Session closed: ${event.agentName || event.sessionId}`);
+        case 'session.destroyed':
+          console.log(`${DIM}-${RESET} [${ts}]${agent} session closed`);
+          break;
+        case 'session:error':
+        case 'session.error':
+          console.log(`${YELLOW}!${RESET} [${ts}]${agent} error: ${event.payload?.error || 'unknown'}`);
+          break;
+        case 'agent:milestone':
+          console.log(`${DIM}→${RESET} [${ts}]${agent} ${event.payload?.milestone || ''}`);
           break;
         case 'coordinator:routing':
           if (event.payload?.phase === 'complete') {
-            console.log(`${DIM}→${RESET} [${ts}] Routed: ${event.payload?.strategy} (${event.payload?.spawnCount || 0} agents)`);
+            console.log(`${DIM}⇒${RESET} [${ts}] routed: ${event.payload?.strategy} → ${event.payload?.agents?.join(', ') || 'unknown'}`);
+          }
+          break;
+        case 'dispatch':
+          console.log(`${GREEN}▶${RESET} [${ts}]${agent} dispatched: ${(event.payload?.message || '').slice(0, 60)}`);
+          break;
+        default:
+          if (event.type.includes('error')) {
+            console.log(`${YELLOW}!${RESET} [${ts}] ${event.type}${agent}`);
           }
           break;
       }
     });
 
+    // 7. Start dashboard HTTP server
+    const dashboardDir = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../../dashboard',
+    );
+    const dashboardPath = path.join(dashboardDir, 'index.html');
+
+    if (fs.existsSync(dashboardPath)) {
+      const dashPort = options.port || 3847;
+      const dashServer = http.createServer((req, res) => {
+        if (req.url === '/' || req.url === '/index.html') {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          fs.createReadStream(dashboardPath).pipe(res);
+        } else if (req.url === '/api/status') {
+          const st = server.getStatus();
+          const history = server.getEventHistory();
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          });
+          res.end(JSON.stringify({
+            ...st,
+            sessionCount: st.activeSessions,
+            recentEvents: history.recent(50),
+          }));
+        } else {
+          res.writeHead(404);
+          res.end('Not found');
+        }
+      });
+
+      dashServer.listen(dashPort, () => {
+        console.log(`  ${DIM}Dashboard:${RESET}   http://localhost:${dashPort}`);
+      });
+
+      // Close dashboard server alongside the main server
+      const _origStop = server.stop.bind(server);
+      server.stop = async () => { dashServer.close(); await _origStop(); };
+    }
+
   } catch (err) {
     fatal(`Failed to start server: ${(err as Error).message}`);
   }
 
-  // 7. Keep alive + graceful shutdown
+  // 8. Keep alive + graceful shutdown
   return new Promise<void>((resolve) => {
     let isShuttingDown = false;
     const shutdown = async () => {

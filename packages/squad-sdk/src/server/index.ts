@@ -21,6 +21,7 @@ import type { SquadConfig } from '../runtime/config.js';
 import type { SquadSession } from '../adapter/types.js';
 import { AgentSessionManager, type AgentSessionManagerConfig, type DispatchResult, type ActiveSessionInfo } from './agent-lifecycle.js';
 import { ServerPersistence, type PersistenceConfig, type ServerStateSnapshot } from './persistence.js';
+import { EventHistory, type HistoryEvent } from './event-history.js';
 
 // ============================================================================
 // Types
@@ -65,6 +66,7 @@ export interface SquadServerStatus {
 export class SquadServer {
   private readonly config: SquadServerConfig;
   private readonly eventBus: EventBus;
+  private readonly eventHistory: EventHistory;
   private readonly toolRegistry: ToolRegistry;
   private readonly persistence: ServerPersistence;
   private readonly serverStartedAt: string;
@@ -78,7 +80,21 @@ export class SquadServer {
   constructor(config: SquadServerConfig) {
     this.config = config;
     this.eventBus = new EventBus();
+    this.eventHistory = new EventHistory(100);
     this.serverStartedAt = new Date().toISOString();
+
+    // Subscribe to all EventBus events and record in history
+    this.eventBus.subscribeAll(async (event) => {
+      const summary = this.summarizeEvent(event);
+      if (summary) {
+        this.eventHistory.push({
+          type: event.type,
+          agentName: event.agentName,
+          summary,
+          details: event.payload as Record<string, unknown>,
+        });
+      }
+    });
 
     const squadRoot = config.squadRoot ?? process.cwd();
 
@@ -297,6 +313,40 @@ export class SquadServer {
   }
 
   /**
+   * Get the EventHistory ring buffer for monitoring.
+   */
+  getEventHistory(): EventHistory {
+    return this.eventHistory;
+  }
+
+  /**
+   * Convert a SquadEvent into a human-readable summary line.
+   * Returns null if the event should be skipped.
+   */
+  private summarizeEvent(event: { type: string; agentName?: string; payload?: unknown }): string | null {
+    const p = event.payload as Record<string, unknown> | undefined;
+    switch (event.type) {
+      case 'session:created':
+      case 'session.created':
+        return `Session created for ${event.agentName || 'unknown'}`;
+      case 'session:destroyed':
+      case 'session.destroyed':
+        return `Session closed for ${event.agentName || 'unknown'}`;
+      case 'coordinator:routing': {
+        const agents = Array.isArray(p?.agents) ? (p.agents as string[]).join(', ') : 'unknown';
+        const strategy = p?.strategy ?? 'default';
+        return `Routed to ${agents} (${strategy})`;
+      }
+      case 'agent:milestone':
+        return `${event.agentName || 'agent'}: ${p?.milestone ?? 'milestone'}`;
+      case 'session:error':
+        return `Error: ${p?.error ?? p?.message ?? 'unknown'}`;
+      default:
+        return `${event.type}: ${event.agentName || 'system'}`;
+    }
+  }
+
+  /**
    * Get the ToolRegistry (e.g. for injecting additional custom tools before start).
    */
   getToolRegistry(): ToolRegistry {
@@ -340,3 +390,8 @@ export {
   type ServerStateSnapshot,
   type SessionRegistryEntry,
 } from './persistence.js';
+
+export {
+  EventHistory,
+  type HistoryEvent,
+} from './event-history.js';

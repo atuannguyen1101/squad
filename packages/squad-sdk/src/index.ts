@@ -191,4 +191,3 @@ export * from './server/index.js';
 
 // MCP (Model Context Protocol bridge)
 export * from './mcp/index.js';
->>>>>>> f0fba37 (feat: add MCP bridge for Copilot integration (Phase 2))
