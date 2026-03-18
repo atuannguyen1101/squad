@@ -197,6 +197,8 @@ async function main(): Promise<void> {
     console.log(`                    upstream remove <name>`);
     console.log(`                    upstream list`);
     console.log(`                    upstream sync [name]`);
+    console.log(`  ${BOLD}serve${RESET}      Start orchestration server (persistent agent sessions)`);
+    console.log(`             Usage: serve [--port <n>] [--no-remote]`);
 
     console.log(`  ${BOLD}help${RESET}       Show this help message`);
     console.log(`\nFlags:`);
@@ -537,6 +539,15 @@ async function main(): Promise<void> {
   if (cmd === 'upstream') {
     const { upstreamCommand } = await import('./cli/commands/upstream.js');
     await upstreamCommand(args.slice(1));
+    return;
+  }
+
+  if (cmd === 'serve') {
+    const { runServe } = await import('./cli/commands/serve.js');
+    const portIdx = args.indexOf('--port');
+    const port = (portIdx !== -1 && args[portIdx + 1]) ? parseInt(args[portIdx + 1]!, 10) : 0;
+    const noRemote = args.includes('--no-remote');
+    await runServe(process.cwd(), { port, remote: !noRemote });
     return;
   }
 

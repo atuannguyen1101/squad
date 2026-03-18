@@ -77,3 +77,6 @@ export type {
 // Base Roles (built-in role catalog)
 export * from './roles/index.js';
 export * from './platform/index.js';
+
+// Server (Orchestration Server)
+export * from './server/index.js';

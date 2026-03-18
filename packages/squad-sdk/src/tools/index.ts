@@ -162,10 +162,16 @@ export class ToolRegistry {
   private tools: Map<string, SquadTool<any>> = new Map();
   private squadRoot: string;
   private sessionPoolGetter?: () => any;
+  private dispatchGetter?: () => ((agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string }>) | undefined;
 
-  constructor(squadRoot = '.squad', sessionPoolGetter?: () => any) {
+  constructor(
+    squadRoot = '.squad',
+    sessionPoolGetter?: () => any,
+    dispatchGetter?: () => ((agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string }>) | undefined,
+  ) {
     this.squadRoot = squadRoot;
     this.sessionPoolGetter = sessionPoolGetter;
+    this.dispatchGetter = dispatchGetter;
     this.registerSquadTools();
   }
 
@@ -199,7 +205,6 @@ export class ToolRegistry {
         required: ['targetAgent', 'task'],
       },
       handler: async (args) => {
-        // Validate target agent exists (stub for now, will check roster later)
         if (!args.targetAgent || args.targetAgent.trim() === '') {
           return {
             textResultForLlm: 'Error: Target agent name is required',
@@ -208,19 +213,52 @@ export class ToolRegistry {
           };
         }
 
-        // Create route request (session creation wired later)
-        const routeRequest: RouteRequest = {
-          targetAgent: args.targetAgent,
-          task: args.task,
-          priority: args.priority || 'normal',
-          context: args.context,
-        };
+        const dispatch = this.dispatchGetter?.();
+        if (!dispatch) {
+          // Fallback: no server connected, write to mailbox file instead
+          const mailboxDir = path.join(this.squadRoot, 'mailbox', args.targetAgent);
+          fs.mkdirSync(mailboxDir, { recursive: true });
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+          const filename = path.join(mailboxDir, `${timestamp}-route.md`);
+          const content = [
+            `## Routed Task`,
+            `**Priority:** ${args.priority || 'normal'}`,
+            `**Task:** ${args.task}`,
+            args.context ? `**Context:** ${args.context}` : '',
+            `**Routed at:** ${new Date().toISOString()}`,
+          ].filter(Boolean).join('\n');
+          fs.writeFileSync(filename, content, 'utf-8');
 
-        return {
-          textResultForLlm: `Task routed to ${args.targetAgent}. Priority: ${routeRequest.priority}. Session creation will be implemented when session lifecycle is in place.`,
-          resultType: 'success',
-          toolTelemetry: { routeRequest },
-        };
+          return {
+            textResultForLlm: `Task written to mailbox for ${args.targetAgent} (server not connected). Priority: ${args.priority || 'normal'}. File: ${filename}`,
+            resultType: 'success',
+            toolTelemetry: {
+              routeRequest: { targetAgent: args.targetAgent, task: args.task, priority: args.priority || 'normal' },
+              fallback: 'mailbox',
+              filename,
+            },
+          };
+        }
+
+        try {
+          const result = await dispatch(args.targetAgent, args.task, args.context);
+          return {
+            textResultForLlm: `Task routed to ${args.targetAgent} (session: ${result.sessionId}). Status: ${result.status}. Priority: ${args.priority || 'normal'}.`,
+            resultType: 'success',
+            toolTelemetry: {
+              routeRequest: { targetAgent: args.targetAgent, task: args.task, priority: args.priority || 'normal' },
+              sessionId: result.sessionId,
+              status: result.status,
+            },
+          };
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          return {
+            textResultForLlm: `Failed to route task to ${args.targetAgent}: ${errorMessage}`,
+            resultType: 'failure',
+            error: errorMessage,
+          };
+        }
       },
     });
 
@@ -389,13 +427,15 @@ export class ToolRegistry {
       },
       handler: async (args) => {
         const pool = this.sessionPoolGetter?.();
-        
+        const hasServer = !!this.dispatchGetter?.();
+
         if (!pool) {
           return {
-            textResultForLlm: 'Session pool not available. Pool size: 0, Active sessions: 0',
+            textResultForLlm: `Session pool not available (server ${hasServer ? 'connected' : 'not connected'}). Pool size: 0, Active sessions: 0`,
             resultType: 'success',
             toolTelemetry: {
               poolAvailable: false,
+              serverConnected: hasServer,
               totalSessions: 0,
               activeSessions: 0,
             },
@@ -426,6 +466,7 @@ export class ToolRegistry {
           activeSessions: pool.active().length,
           totalSessions: allSessions.length,
           filteredCount: filteredSessions.length,
+          serverConnected: hasServer,
         };
 
         // Build response
@@ -438,8 +479,14 @@ export class ToolRegistry {
           sessionsByStatus[s.status] = (sessionsByStatus[s.status] || 0) + 1;
         }
 
-        let textResult = `Pool status: ${poolInfo.poolSize}/${poolInfo.capacity} sessions (${poolInfo.activeSessions} active)`;
-        
+        let textResult = `Pool status: ${poolInfo.poolSize}/${poolInfo.capacity} sessions (${poolInfo.activeSessions} active, server ${hasServer ? 'connected' : 'offline'})`;
+
+        // Show per-agent breakdown prominently
+        const agentNames = Object.keys(sessionsByAgent);
+        if (agentNames.length > 0) {
+          textResult += `\nAgents: ${agentNames.map(name => `${name}(${sessionsByAgent[name]})`).join(', ')}`;
+        }
+
         if (args.agentName || args.status) {
           textResult += `\nFiltered results: ${poolInfo.filteredCount} sessions`;
         }
@@ -449,7 +496,7 @@ export class ToolRegistry {
           for (const session of filteredSessions) {
             const s = session as any;
             const uptime = s.createdAt ? Math.floor((Date.now() - s.createdAt.getTime()) / 1000) : 0;
-            textResult += `\n- ${s.id.slice(0, 8)}: ${s.agentName} (${s.status}, ${uptime}s uptime)`;
+            textResult += `\n- [${s.agentName}] ${s.id.slice(0, 8)}: ${s.status}, ${uptime}s uptime`;
           }
         }
 
