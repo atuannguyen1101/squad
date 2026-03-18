@@ -188,4 +188,7 @@ export {
 
 // Server (Orchestration Server)
 export * from './server/index.js';
->>>>>>> 7ea1b7a (feat: add orchestration server with inter-agent communication)
+
+// MCP (Model Context Protocol bridge)
+export * from './mcp/index.js';
+>>>>>>> f0fba37 (feat: add MCP bridge for Copilot integration (Phase 2))

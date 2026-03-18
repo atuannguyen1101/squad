@@ -224,6 +224,8 @@ async function main(): Promise<void> {
     console.log(`             Usage: economy [on|off]`);
     console.log(`  ${BOLD}serve${RESET}      Start orchestration server (persistent agent sessions)`);
     console.log(`             Usage: serve [--port <n>] [--no-remote]`);
+    console.log(`  ${BOLD}mcp${RESET}        Start MCP server for Copilot integration`);
+    console.log(`             Usage: mcp [--squad-root <path>]`);
 
     console.log(`  ${BOLD}help${RESET}       Show this help message`);
     console.log(`\nFlags:`);
@@ -627,6 +629,14 @@ async function main(): Promise<void> {
     const port = (portIdx !== -1 && args[portIdx + 1]) ? parseInt(args[portIdx + 1]!, 10) : 0;
     const noRemote = args.includes('--no-remote');
     await runServe(process.cwd(), { port, remote: !noRemote });
+    return;
+  }
+
+  if (cmd === 'mcp') {
+    const { runMCP } = await import('./cli/commands/mcp.js');
+    const squadRootIdx = args.indexOf('--squad-root');
+    const squadRoot = (squadRootIdx !== -1 && args[squadRootIdx + 1]) ? args[squadRootIdx + 1] : undefined;
+    await runMCP(process.cwd(), { squadRoot });
     return;
   }
 

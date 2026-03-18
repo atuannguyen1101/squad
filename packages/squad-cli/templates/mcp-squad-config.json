@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "squad": {
+      "command": "npx",
+      "args": ["@bradygaster/squad-cli", "mcp"],
+      "env": {}
+    }
+  }
+}
