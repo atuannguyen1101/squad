@@ -39,8 +39,10 @@ export class MCPServer {
     const rl = readline.createInterface({ input: process.stdin });
 
     rl.on('line', async (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return; // Skip empty lines
       try {
-        const request = JSON.parse(line);
+        const request = JSON.parse(trimmed);
         const response = await this.handleRequest(request);
         if (response) {
           // JSON-RPC responses go to stdout, one per line
