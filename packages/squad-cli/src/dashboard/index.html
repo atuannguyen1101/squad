@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Squad Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+      background: #1a1a2e; color: #e0e0e0; padding: 16px;
+      font-size: 13px; line-height: 1.5;
+    }
+
+    .header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 16px; background: #16213e; border-radius: 8px;
+      margin-bottom: 16px;
+    }
+    .header h1 { font-size: 16px; font-weight: 600; }
+    .header .status { display: flex; gap: 16px; font-size: 12px; }
+    .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+    .dot.green { background: #00e676; }
+    .dot.yellow { background: #ffd740; }
+    .dot.red { background: #ff5252; }
+
+    .panels { display: grid; grid-template-columns: 320px 1fr; gap: 16px; height: calc(100vh - 100px); }
+    .panel { background: #16213e; border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+    .panel-header { padding: 10px 16px; background: #0f3460; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .panel-body { padding: 8px; overflow-y: auto; flex: 1; }
+
+    .agent-card {
+      padding: 10px 12px; margin: 4px 0; background: #1a1a2e; border-radius: 6px;
+      border-left: 3px solid #0f3460;
+    }
+    .agent-card.active { border-left-color: #00e676; }
+    .agent-card.idle { border-left-color: #ffd740; }
+    .agent-card .name { font-weight: 600; color: #82b1ff; }
+    .agent-card .meta { font-size: 11px; color: #888; margin-top: 2px; }
+
+    .event { padding: 4px 8px; margin: 2px 0; font-size: 12px; border-radius: 4px; }
+    .event:hover { background: rgba(255,255,255,0.03); }
+    .event .time { color: #666; margin-right: 8px; }
+    .event .agent { color: #82b1ff; font-weight: 600; }
+    .event.created { border-left: 2px solid #00e676; padding-left: 6px; }
+    .event.destroyed { border-left: 2px solid #666; padding-left: 6px; }
+    .event.error { border-left: 2px solid #ff5252; padding-left: 6px; color: #ff8a80; }
+    .event.dispatch { border-left: 2px solid #82b1ff; padding-left: 6px; }
+
+    .empty { color: #555; text-align: center; padding: 24px; font-style: italic; }
+
+    @media (max-width: 700px) { .panels { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🚀 Squad Orchestration Server</h1>
+    <div class="status">
+      <span><span class="dot" id="statusDot"></span> <span id="statusText">Connecting...</span></span>
+      <span>Sessions: <strong id="sessionCount">0</strong>/<strong id="poolCapacity">10</strong></span>
+      <span>Events: <strong id="eventCount">0</strong></span>
+    </div>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <div class="panel-header">Active Agents</div>
+      <div class="panel-body" id="agentList">
+        <div class="empty">No active agents</div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">Event Stream</div>
+      <div class="panel-body" id="eventStream">
+        <div class="empty">Waiting for events...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let agents = [];
+    let events = [];
+    const $ = id => document.getElementById(id);
+
+    function renderAgents() {
+      const el = $('agentList');
+      if (!agents.length) { el.innerHTML = '<div class="empty">No active agents</div>'; return; }
+      el.innerHTML = agents.map(a => {
+        const status = a.status || 'active';
+        const role = a.charterRole || a.role || '';
+        const emoji = role.match(/lead|arch/i) ? '🏗️' : role.match(/front|ui/i) ? '⚛️'
+          : role.match(/back|api|core/i) ? '🔧' : role.match(/test|qa/i) ? '🧪'
+          : role.match(/doc/i) ? '📝' : role.match(/secur/i) ? '🔒' : '👤';
+        const sid = (a.sessionId || '').slice(0, 8);
+        return `<div class="agent-card ${status}">
+          <div class="name">${emoji} ${a.agentName}</div>
+          <div class="meta">${role || 'agent'} · session: ${sid}…</div>
+        </div>`;
+      }).join('');
+    }
+
+    function renderEvents() {
+      const el = $('eventStream');
+      if (!events.length) { el.innerHTML = '<div class="empty">Waiting for events...</div>'; return; }
+      el.innerHTML = events.slice(-200).map(e => {
+        const time = e.timestamp ? e.timestamp.slice(11, 19) : '';
+        const agent = e.agentName ? `<span class="agent">[${e.agentName}]</span> ` : '';
+        const t = e.type || '';
+        const cls = t.includes('created') ? 'created' : t.includes('destroyed') || t.includes('closed')
+          ? 'destroyed' : t.includes('error') ? 'error' : t.includes('dispatch') ? 'dispatch' : '';
+        return `<div class="event ${cls}"><span class="time">${time}</span> ${agent}${e.summary || t}</div>`;
+      }).join('');
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function setStatus(state) {
+      $('statusDot').className = 'dot ' + (state === 'connected' ? 'green' : state === 'error' ? 'red' : 'yellow');
+      $('statusText').textContent = state === 'connected' ? 'Connected' : state === 'error' ? 'Disconnected' : 'Connecting...';
+    }
+
+    function handleMessage(data) {
+      if (data.type === 'status' || data.agents) {
+        if (data.agents) { agents = data.agents; renderAgents(); }
+        if (data.activeSessions !== undefined) $('sessionCount').textContent = data.activeSessions;
+        if (data.sessionCount !== undefined) $('sessionCount').textContent = data.sessionCount;
+        if (data.poolCapacity !== undefined) $('poolCapacity').textContent = data.poolCapacity;
+        if (data.recentEvents) {
+          for (const e of data.recentEvents) {
+            if (!events.find(x => x.id === e.id)) events.push(e);
+          }
+          $('eventCount').textContent = events.length;
+          renderEvents();
+        }
+      } else {
+        addEvent({
+          type: data.type || 'unknown', agentName: data.agentName || data.agent,
+          summary: data.summary || data.message || JSON.stringify(data).slice(0, 100),
+          timestamp: data.timestamp || new Date().toISOString(),
+        });
+      }
+    }
+
+    function addEvent(event) {
+      events.push(event);
+      if (events.length > 500) events = events.slice(-500);
+      $('eventCount').textContent = events.length;
+      renderEvents();
+    }
+
+    // WebSocket with auto-reconnect
+    function connect() {
+      const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
+      setStatus('connecting');
+      ws.onopen = () => { setStatus('connected'); addEvent({ type: 'system', summary: 'Connected to server', timestamp: new Date().toISOString() }); };
+      ws.onmessage = (msg) => { try { handleMessage(JSON.parse(msg.data)); } catch {} };
+      ws.onclose = () => { setStatus('error'); setTimeout(connect, 3000); };
+      ws.onerror = () => setStatus('error');
+    }
+
+    async function pollStatus() {
+      try {
+        const res = await fetch('/api/status');
+        if (res.ok) handleMessage(await res.json());
+      } catch {}
+    }
+
+    if (location.protocol.startsWith('http')) { connect(); }
+    setInterval(pollStatus, 5000);
+    pollStatus();
+  </script>
+</body>
+</html>

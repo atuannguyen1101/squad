@@ -43,6 +43,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   const server = new SquadServer(serverConfig);
 
   let started = false;
+  let serverStartTime = Date.now();
 
   // Lazy start — connect to Copilot on first dispatch
   async function ensureStarted(): Promise<void> {
@@ -50,6 +51,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       try {
         await server.start();
         started = true;
+        serverStartTime = Date.now();
         process.stderr.write('[squad-mcp] Server connected to Copilot backend\n');
       } catch (err) {
         process.stderr.write(`[squad-mcp] Failed to start: ${err instanceof Error ? err.message : err}\n`);
@@ -78,10 +80,13 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
     async (args) => {
       await ensureStarted();
       const result = await server.dispatch(args.agentName, args.message, args.context);
+      const resolvedNote = result.agentName !== args.agentName
+        ? ` (resolved "${args.agentName}" → "${result.agentName}")`
+        : '';
       return {
         content: [{
           type: 'text',
-          text: `Dispatched to ${args.agentName} (session: ${result.sessionId}, status: ${result.status})`,
+          text: `Dispatched to ${result.agentName}${resolvedNote} (session: ${result.sessionId}, status: ${result.status})`,
         }],
       };
     },
@@ -105,14 +110,36 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       }
       const status = server.getStatus();
       const agentList = status.agents.map(a => `  - ${a.agentName}: ${a.charterRole} (session: ${a.sessionId.slice(0, 8)})`).join('\n');
+
+      // Uptime
+      const uptimeMs = Date.now() - serverStartTime;
+      const uptimeSec = Math.floor(uptimeMs / 1000);
+      const uptimeMin = Math.floor(uptimeSec / 60);
+      const uptimeStr = uptimeMin > 0
+        ? `${uptimeMin}m ${uptimeSec % 60}s`
+        : `${uptimeSec}s`;
+
+      // Recent events summary
+      const history = server.getEventHistory();
+      const recentEvents = history.recent(3);
+      const recentSummary = recentEvents.length > 0
+        ? recentEvents.map(e => {
+          const ts = e.timestamp.slice(11, 19);
+          return `  ${ts} ${e.summary}`;
+        }).join('\n')
+        : '  (none)';
+
       return {
         content: [{
           type: 'text',
           text: [
             `Squad Server: ${status.running ? 'running' : 'stopped'}`,
+            `Uptime: ${uptimeStr}`,
             `Active sessions: ${status.activeSessions}`,
             `Connected: ${status.connectedToHost}`,
+            `Events recorded: ${history.size}`,
             status.agents.length > 0 ? `Agents:\n${agentList}` : 'No active agents',
+            `Recent activity:\n${recentSummary}`,
           ].join('\n'),
         }],
       };
@@ -165,6 +192,49 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       await mgr?.closeSession(args.agentName);
       return {
         content: [{ type: 'text', text: `Session closed for ${args.agentName}` }],
+      };
+    },
+  );
+
+  // squad_monitor: Get recent server events for monitoring/debugging
+  mcp.addTool(
+    {
+      name: 'squad_monitor',
+      description: 'Get recent server events and activity. Shows what agents have been doing, session lifecycle events, errors, and routing decisions. Use for monitoring and debugging.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          count: { type: 'number', description: 'Number of recent events to return (default: 20, max: 100)' },
+          agentName: { type: 'string', description: 'Filter events by agent name' },
+          type: { type: 'string', description: 'Filter events by type (e.g., "session", "dispatch", "error")' },
+        },
+      },
+    },
+    async (args) => {
+      if (!started) {
+        return { content: [{ type: 'text', text: 'Server not started yet. No events recorded.' }] };
+      }
+      const history = server.getEventHistory();
+      const events = history.recent(
+        Math.min(args.count || 20, 100),
+        { type: args.type, agentName: args.agentName },
+      );
+
+      if (events.length === 0) {
+        return { content: [{ type: 'text', text: 'No events recorded yet.' }] };
+      }
+
+      const lines = events.map(e => {
+        const ts = e.timestamp.slice(11, 19); // HH:MM:SS
+        const agent = e.agentName ? ` [${e.agentName}]` : '';
+        return `${ts}${agent} ${e.summary}`;
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Recent events (${events.length}/${history.size} total):\n${lines.join('\n')}`,
+        }],
       };
     },
   );
