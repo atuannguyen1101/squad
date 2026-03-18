@@ -20,6 +20,7 @@ import type { RemoteBridgeConfig } from '../remote/types.js';
 import type { SquadConfig } from '../runtime/config.js';
 import type { SquadSession } from '../adapter/types.js';
 import { AgentSessionManager, type AgentSessionManagerConfig, type DispatchResult, type ActiveSessionInfo } from './agent-lifecycle.js';
+import { ServerPersistence, type PersistenceConfig, type ServerStateSnapshot } from './persistence.js';
 
 // ============================================================================
 // Types
@@ -65,6 +66,8 @@ export class SquadServer {
   private readonly config: SquadServerConfig;
   private readonly eventBus: EventBus;
   private readonly toolRegistry: ToolRegistry;
+  private readonly persistence: ServerPersistence;
+  private readonly serverStartedAt: string;
 
   private client: SquadClientWithPool | null = null;
   private coordinator: SquadCoordinator | null = null;
@@ -75,8 +78,16 @@ export class SquadServer {
   constructor(config: SquadServerConfig) {
     this.config = config;
     this.eventBus = new EventBus();
+    this.serverStartedAt = new Date().toISOString();
 
     const squadRoot = config.squadRoot ?? process.cwd();
+
+    // Initialize persistence for crash recovery
+    this.persistence = new ServerPersistence({
+      squadRoot,
+      autoSave: true,
+      autoSaveInterval: 30_000,
+    });
 
     // Initialize ToolRegistry with lazy getters so it can reference
     // components that aren't created until start().
@@ -126,6 +137,13 @@ export class SquadServer {
       defaultModel: this.config.defaultModel ?? this.config.squadConfig.models?.defaultModel,
       workingDirectory: this.config.workingDirectory ?? squadRoot,
     });
+
+    // Wire persistence into session manager and load any saved state
+    this.sessionManager.setPersistence(this.persistence, this.serverStartedAt);
+    const savedState = this.persistence.loadState();
+    if (savedState) {
+      process.stderr.write(`[persistence] Recovered state: ${savedState.sessions.length} session(s) from ${savedState.savedAt}\n`);
+    }
 
     // 3. Initialize the coordinator with fan-out deps wired to session manager
     const coordinatorOptions: SquadCoordinatorOptions = {
@@ -182,6 +200,9 @@ export class SquadServer {
     }
 
     this.running = true;
+
+    // Start auto-save after all components are ready
+    this.persistence.startAutoSave(() => this.getStateSnapshot());
   }
 
   /**
@@ -189,6 +210,12 @@ export class SquadServer {
    */
   async stop(): Promise<void> {
     if (!this.running) return;
+
+    // Save final state and stop auto-save before tearing down components
+    try {
+      this.persistence.saveState(this.getStateSnapshot());
+    } catch { /* best-effort final save */ }
+    this.persistence.stopAutoSave();
 
     // 1. Close all agent sessions
     if (this.sessionManager) {
@@ -246,6 +273,23 @@ export class SquadServer {
   }
 
   /**
+   * Get a full state snapshot (delegates to session manager).
+   */
+  getStateSnapshot(): ServerStateSnapshot {
+    if (this.sessionManager) {
+      return this.sessionManager.getStateSnapshot();
+    }
+    return {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      serverStartedAt: this.serverStartedAt,
+      sessions: [],
+      poolSize: 0,
+      poolCapacity: 0,
+    };
+  }
+
+  /**
    * Get the EventBus reference for external subscribers.
    */
   getEventBus(): EventBus {
@@ -289,3 +333,10 @@ export {
   type DispatchResult,
   type ActiveSessionInfo,
 } from './agent-lifecycle.js';
+
+export {
+  ServerPersistence,
+  type PersistenceConfig,
+  type ServerStateSnapshot,
+  type SessionRegistryEntry,
+} from './persistence.js';

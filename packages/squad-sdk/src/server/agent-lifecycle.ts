@@ -15,6 +15,7 @@ import type { SquadClientWithPool } from '../client/index.js';
 import type { SquadSession, SquadSessionConfig, SquadTool } from '../adapter/types.js';
 import type { EventBus } from '../runtime/event-bus.js';
 import { CharterCompiler, type AgentCharter } from '../agents/index.js';
+import type { ServerPersistence, SessionRegistryEntry, ServerStateSnapshot } from './persistence.js';
 
 // ============================================================================
 // Types
@@ -81,6 +82,10 @@ export class AgentSessionManager {
   private readonly workingDirectory: string | undefined;
   private readonly charterCompiler: CharterCompiler;
 
+  /** Optional persistence layer for crash recovery */
+  private persistence: ServerPersistence | null = null;
+  private serverStartedAt: string = new Date().toISOString();
+
   /** Active agent sessions keyed by agent name */
   private sessions: Map<string, AgentSessionEntry> = new Map();
 
@@ -92,6 +97,44 @@ export class AgentSessionManager {
     this.defaultModel = config.defaultModel;
     this.workingDirectory = config.workingDirectory;
     this.charterCompiler = new CharterCompiler();
+  }
+
+  /**
+   * Attach a persistence layer for crash recovery.
+   * Should be called before any sessions are created.
+   */
+  setPersistence(persistence: ServerPersistence, serverStartedAt?: string): void {
+    this.persistence = persistence;
+    if (serverStartedAt) {
+      this.serverStartedAt = serverStartedAt;
+    }
+  }
+
+  /**
+   * Export current sessions as registry entries for persistence.
+   */
+  getRegistryEntries(): SessionRegistryEntry[] {
+    return Array.from(this.sessions.values()).map(entry => ({
+      sessionId: entry.session.sessionId,
+      agentName: entry.agentName,
+      createdAt: entry.createdAt.toISOString(),
+      lastMessageAt: entry.lastActiveAt.toISOString(),
+      status: 'active' as const,
+    }));
+  }
+
+  /**
+   * Export full server state snapshot for auto-save.
+   */
+  getStateSnapshot(): ServerStateSnapshot {
+    return {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      serverStartedAt: this.serverStartedAt,
+      sessions: this.getRegistryEntries(),
+      poolSize: this.client.pool.size,
+      poolCapacity: this.client.pool.size,
+    };
   }
 
   /**
@@ -138,6 +181,11 @@ export class AgentSessionManager {
     };
     this.sessions.set(agentName, entry);
 
+    // Persist registry after new session creation
+    if (this.persistence) {
+      try { this.persistence.saveRegistry(this.getRegistryEntries()); } catch { /* best-effort */ }
+    }
+
     await this.eventBus.emit({
       type: 'session:created',
       sessionId: session.sessionId,
@@ -166,6 +214,11 @@ export class AgentSessionManager {
     const entry = this.sessions.get(agentName);
     if (entry) {
       entry.lastActiveAt = new Date();
+    }
+
+    // Persist updated lastMessageAt
+    if (this.persistence) {
+      try { this.persistence.saveRegistry(this.getRegistryEntries()); } catch { /* best-effort */ }
     }
 
     await this.eventBus.emit({
@@ -280,6 +333,11 @@ export class AgentSessionManager {
     }
 
     this.sessions.delete(agentName);
+
+    // Persist registry after session removal
+    if (this.persistence) {
+      try { this.persistence.saveRegistry(this.getRegistryEntries()); } catch { /* best-effort */ }
+    }
 
     await this.eventBus.emit({
       type: 'session:destroyed',
