@@ -80,3 +80,6 @@ export * from './platform/index.js';
 
 // Server (Orchestration Server)
 export * from './server/index.js';
+
+// MCP (Model Context Protocol bridge)
+export * from './mcp/index.js';
