@@ -185,3 +185,7 @@ export {
   type SystemPromptOptions,
   type SquadConfig,
 } from './agents/agent-lifecycle.js';
+
+// Server (Orchestration Server)
+export * from './server/index.js';
+>>>>>>> 7ea1b7a (feat: add orchestration server with inter-agent communication)
