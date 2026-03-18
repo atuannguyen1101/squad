@@ -10,6 +10,7 @@ coverage/
 .squad/log/
 .squad/decisions/inbox/
 .squad/sessions/
+.squad/.runtime/
 .squad/config.json
 .test-cli-*
 # Docs site generated files
