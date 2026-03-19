@@ -292,11 +292,18 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
     });
 
     dashServer.listen(dashPort, () => {
-      process.stderr.write(`[squad-mcp] Dashboard: http://localhost:${dashPort}\n`);
+      const addr = dashServer!.address();
+      const actualPort = typeof addr === 'object' && addr ? addr.port : dashPort;
+      process.stderr.write(`[squad-mcp] Dashboard: http://localhost:${actualPort}\n`);
     });
     dashServer.on('error', (err: any) => {
       if (err.code === 'EADDRINUSE') {
-        process.stderr.write(`[squad-mcp] Dashboard port ${dashPort} in use, skipping\n`);
+        process.stderr.write(`[squad-mcp] Dashboard port ${dashPort} in use, trying random port\n`);
+        dashServer!.listen(0, () => {
+          const addr = dashServer!.address();
+          const actualPort = typeof addr === 'object' && addr ? addr.port : 0;
+          process.stderr.write(`[squad-mcp] Dashboard: http://localhost:${actualPort}\n`);
+        });
       }
     });
   }
