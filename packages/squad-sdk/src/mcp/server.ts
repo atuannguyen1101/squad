@@ -325,6 +325,29 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
           }
         });
+      } else if (req.url?.startsWith('/api/sessions/') && req.method === 'GET') {
+        const agentName = decodeURIComponent(req.url.split('/api/sessions/')[1]?.split('?')[0] ?? '');
+        if (!agentName) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agent name required' })); return; }
+        const mgr = server.getSessionManager();
+        const messages = mgr?.getMessages(agentName) ?? [];
+        res.writeHead(200, cors);
+        res.end(JSON.stringify({ agentName, messages }));
+      } else if (req.url === '/api/send' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (c: Buffer) => body += c.toString());
+        req.on('end', async () => {
+          try {
+            const { agentName, message } = JSON.parse(body);
+            if (!agentName || !message) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agentName and message required' })); return; }
+            const mgr = server.getSessionManager();
+            await mgr?.sendFollowUp(agentName, message);
+            res.writeHead(200, cors);
+            res.end(JSON.stringify({ sent: true, agentName }));
+          } catch (err) {
+            res.writeHead(500, cors);
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+          }
+        });
       } else {
         res.writeHead(404);
         res.end('Not found');

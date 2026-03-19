@@ -39,6 +39,12 @@ export interface AgentSessionManagerConfig {
   mcpServers?: Record<string, SquadMCPServerConfig>;
 }
 
+export interface SessionMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: string;
+}
+
 export interface AgentSessionEntry {
   /** Agent name */
   agentName: string;
@@ -50,6 +56,8 @@ export interface AgentSessionEntry {
   createdAt: Date;
   /** Timestamp of the last dispatched message */
   lastActiveAt: Date;
+  /** Captured conversation messages */
+  messages: SessionMessage[];
 }
 
 export interface DispatchResult {
@@ -67,6 +75,7 @@ export interface ActiveSessionInfo {
   createdAt: Date;
   lastActiveAt: Date;
   charterRole: string;
+  messageCount: number;
 }
 
 // Maximum bytes of history to include in the compiled charter prompt
@@ -246,8 +255,26 @@ export class AgentSessionManager {
       charter,
       createdAt: now,
       lastActiveAt: now,
+      messages: [],
     };
     this.sessions.set(resolved, entry);
+
+    // Subscribe to session events to capture assistant responses
+    try {
+      session.on('message', (event) => {
+        const content = typeof event.content === 'string' ? event.content
+          : typeof event.text === 'string' ? event.text
+          : JSON.stringify(event);
+        entry.messages.push({
+          role: 'assistant',
+          content,
+          timestamp: new Date().toISOString(),
+        });
+        entry.lastActiveAt = new Date();
+      });
+    } catch {
+      // Session may not support event subscription — continue without
+    }
 
     // Persist registry after new session creation
     if (this.persistence) {
@@ -278,10 +305,15 @@ export class AgentSessionManager {
 
     await session.sendMessage({ prompt });
 
-    // Update last-active timestamp
+    // Capture outbound message and update timestamp
     const entry = this.sessions.get(resolvedName);
     if (entry) {
       entry.lastActiveAt = new Date();
+      entry.messages.push({
+        role: 'user',
+        content: prompt,
+        timestamp: new Date().toISOString(),
+      });
     }
 
     // Persist updated lastMessageAt
@@ -436,7 +468,28 @@ export class AgentSessionManager {
       createdAt: entry.createdAt,
       lastActiveAt: entry.lastActiveAt,
       charterRole: entry.charter.role,
+      messageCount: entry.messages.length,
     }));
+  }
+
+  /**
+   * Get conversation messages for a specific agent session.
+   */
+  getMessages(agentName: string): SessionMessage[] {
+    const resolved = resolveAgentName(this.squadRoot, agentName);
+    return this.sessions.get(resolved)?.messages ?? [];
+  }
+
+  /**
+   * Send a follow-up message to an existing agent session.
+   */
+  async sendFollowUp(agentName: string, message: string): Promise<void> {
+    const resolved = resolveAgentName(this.squadRoot, agentName);
+    const entry = this.sessions.get(resolved);
+    if (!entry) throw new Error(`No active session for ${resolved}`);
+    entry.messages.push({ role: 'user', content: message, timestamp: new Date().toISOString() });
+    await entry.session.sendMessage({ prompt: message });
+    entry.lastActiveAt = new Date();
   }
 
   /**
