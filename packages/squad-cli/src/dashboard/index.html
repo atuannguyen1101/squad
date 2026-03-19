@@ -119,12 +119,11 @@
     }
 
     function handleMessage(data) {
-      if (data.type === 'status' || data.agents) {
-        if (data.agents) { agents = data.agents; renderAgents(); }
+      if (data.running !== undefined || data.agents !== undefined) {
+        if (data.agents && Array.isArray(data.agents)) { agents = data.agents; renderAgents(); }
         if (data.activeSessions !== undefined) $('sessionCount').textContent = data.activeSessions;
-        if (data.sessionCount !== undefined) $('sessionCount').textContent = data.sessionCount;
         if (data.poolCapacity !== undefined) $('poolCapacity').textContent = data.poolCapacity;
-        if (data.recentEvents) {
+        if (data.recentEvents && Array.isArray(data.recentEvents)) {
           for (const e of data.recentEvents) {
             if (!events.find(x => x.id === e.id)) events.push(e);
           }
@@ -147,25 +146,33 @@
       renderEvents();
     }
 
-    // WebSocket with auto-reconnect
+    // WebSocket with auto-reconnect (optional — polling is the primary method)
+    let wsConnected = false;
     function connect() {
-      const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
-      setStatus('connecting');
-      ws.onopen = () => { setStatus('connected'); addEvent({ type: 'system', summary: 'Connected to server', timestamp: new Date().toISOString() }); };
-      ws.onmessage = (msg) => { try { handleMessage(JSON.parse(msg.data)); } catch {} };
-      ws.onclose = () => { setStatus('error'); setTimeout(connect, 3000); };
-      ws.onerror = () => setStatus('error');
+      try {
+        const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
+        ws.onopen = () => { wsConnected = true; setStatus('connected'); };
+        ws.onmessage = (msg) => { try { handleMessage(JSON.parse(msg.data)); } catch {} };
+        ws.onclose = () => { wsConnected = false; setTimeout(connect, 10000); };
+        ws.onerror = () => { wsConnected = false; };
+      } catch { /* WebSocket not available — polling only */ }
     }
 
     async function pollStatus() {
       try {
         const res = await fetch('/api/status');
-        if (res.ok) handleMessage(await res.json());
-      } catch {}
+        if (res.ok) {
+          const data = await res.json();
+          if (!wsConnected) setStatus(data.running ? 'connected' : 'error');
+          handleMessage(data);
+        }
+      } catch {
+        if (!wsConnected) setStatus('error');
+      }
     }
 
     if (location.protocol.startsWith('http')) { connect(); }
-    setInterval(pollStatus, 5000);
+    setInterval(pollStatus, 3000);
     pollStatus();
   </script>
 </body>
