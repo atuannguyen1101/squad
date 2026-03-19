@@ -47,6 +47,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
 
   let started = false;
   let serverStartTime = Date.now();
+  let dashboardUrl: string | null = null;
 
   // Lazy start — connect to Copilot on first dispatch
   async function ensureStarted(): Promise<void> {
@@ -140,10 +141,11 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             `Uptime: ${uptimeStr}`,
             `Active sessions: ${status.activeSessions}`,
             `Connected: ${status.connectedToHost}`,
+            dashboardUrl ? `Dashboard: ${dashboardUrl}` : null,
             `Events recorded: ${history.size}`,
             status.agents.length > 0 ? `Agents:\n${agentList}` : 'No active agents',
             `Recent activity:\n${recentSummary}`,
-          ].join('\n'),
+          ].filter(Boolean).join('\n'),
         }],
       };
     },
@@ -421,7 +423,8 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
     dashServer.listen(dashPort, () => {
       const addr = dashServer!.address();
       const actualPort = typeof addr === 'object' && addr ? addr.port : dashPort;
-      process.stderr.write(`[squad-mcp] Dashboard: http://localhost:${actualPort}\n`);
+      dashboardUrl = `http://localhost:${actualPort}`;
+      process.stderr.write(`[squad-mcp] Dashboard: ${dashboardUrl}\n`);
     });
     dashServer.on('error', (err: any) => {
       if (err.code === 'EADDRINUSE') {
@@ -429,7 +432,8 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         dashServer!.listen(0, () => {
           const addr = dashServer!.address();
           const actualPort = typeof addr === 'object' && addr ? addr.port : 0;
-          process.stderr.write(`[squad-mcp] Dashboard: http://localhost:${actualPort}\n`);
+          dashboardUrl = `http://localhost:${actualPort}`;
+          process.stderr.write(`[squad-mcp] Dashboard: ${dashboardUrl}\n`);
         });
       }
     });
