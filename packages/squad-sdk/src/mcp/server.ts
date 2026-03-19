@@ -256,7 +256,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   process.on('SIGTERM', shutdown);
 
   // --- Start dashboard HTTP server ---
-  const dashPort = parseInt(process.env['SQUAD_DASHBOARD_PORT'] ?? '3847', 10);
+  const dashPort = parseInt(process.env['SQUAD_DASHBOARD_PORT'] ?? '3850', 10);
   const dashboardPath = path.resolve(
     path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')),
     '..', '..', '..', 'squad-cli', 'src', 'dashboard', 'index.html',
@@ -269,22 +269,62 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   const htmlPath = fs.existsSync(dashboardPath) ? dashboardPath : fs.existsSync(distDashPath) ? distDashPath : null;
 
   if (htmlPath) {
-    dashServer = http.createServer((req, res) => {
+    dashServer = http.createServer(async (req, res) => {
+      // CORS for all API routes
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Allow-Headers': 'Content-Type' });
+        res.end();
+        return;
+      }
+      const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
+
       if (req.url === '/' || req.url === '/index.html') {
         res.writeHead(200, { 'Content-Type': 'text/html' });
         fs.createReadStream(htmlPath).pipe(res);
       } else if (req.url === '/api/status') {
         const st = started ? server.getStatus() : { running: false, activeSessions: 0, agents: [], poolCapacity: 0, connectedToHost: false };
         const history = started ? server.getEventHistory() : null;
-        res.writeHead(200, {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        });
+        res.writeHead(200, cors);
         res.end(JSON.stringify({
           ...st,
+          started,
+          uptime: started ? Math.floor((Date.now() - serverStartTime) / 1000) : 0,
           sessionCount: st.activeSessions,
-          recentEvents: history?.recent(50) ?? [],
+          recentEvents: history?.recent(100) ?? [],
+          totalEvents: history?.size ?? 0,
         }));
+      } else if (req.url === '/api/dispatch' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (c: Buffer) => body += c.toString());
+        req.on('end', async () => {
+          try {
+            const { agentName, message, context } = JSON.parse(body);
+            if (!agentName || !message) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agentName and message required' })); return; }
+            await ensureStarted();
+            const result = await server.dispatch(agentName, message, context);
+            res.writeHead(200, cors);
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            res.writeHead(500, cors);
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+          }
+        });
+      } else if (req.url === '/api/close' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (c: Buffer) => body += c.toString());
+        req.on('end', async () => {
+          try {
+            const { agentName } = JSON.parse(body);
+            if (!agentName) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agentName required' })); return; }
+            const mgr = server.getSessionManager();
+            await mgr?.closeSession(agentName);
+            res.writeHead(200, cors);
+            res.end(JSON.stringify({ closed: agentName }));
+          } catch (err) {
+            res.writeHead(500, cors);
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+          }
+        });
       } else {
         res.writeHead(404);
         res.end('Not found');
