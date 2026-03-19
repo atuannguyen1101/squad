@@ -8,6 +8,9 @@
 import { MCPServer } from './protocol.js';
 import { SquadServer, type SquadServerConfig } from '../server/index.js';
 import type { SquadConfig } from '../runtime/config.js';
+import * as http from 'node:http';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 export interface SquadMCPServerOptions {
   /** Squad root directory */
@@ -240,8 +243,10 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // --- Graceful shutdown ---
+  let dashServer: http.Server | null = null;
   const shutdown = async () => {
     process.stderr.write('[squad-mcp] Shutting down...\n');
+    if (dashServer) dashServer.close();
     if (started) {
       await server.stop();
     }
@@ -249,6 +254,52 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+
+  // --- Start dashboard HTTP server ---
+  const dashPort = parseInt(process.env['SQUAD_DASHBOARD_PORT'] ?? '3847', 10);
+  const dashboardPath = path.resolve(
+    path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')),
+    '..', '..', '..', 'squad-cli', 'src', 'dashboard', 'index.html',
+  );
+  // Also check dist-relative path for when running from compiled output
+  const distDashPath = path.resolve(
+    path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')),
+    '..', '..', '..', '..', 'squad-cli', 'src', 'dashboard', 'index.html',
+  );
+  const htmlPath = fs.existsSync(dashboardPath) ? dashboardPath : fs.existsSync(distDashPath) ? distDashPath : null;
+
+  if (htmlPath) {
+    dashServer = http.createServer((req, res) => {
+      if (req.url === '/' || req.url === '/index.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        fs.createReadStream(htmlPath).pipe(res);
+      } else if (req.url === '/api/status') {
+        const st = started ? server.getStatus() : { running: false, activeSessions: 0, agents: [], poolCapacity: 0, connectedToHost: false };
+        const history = started ? server.getEventHistory() : null;
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(JSON.stringify({
+          ...st,
+          sessionCount: st.activeSessions,
+          recentEvents: history?.recent(50) ?? [],
+        }));
+      } else {
+        res.writeHead(404);
+        res.end('Not found');
+      }
+    });
+
+    dashServer.listen(dashPort, () => {
+      process.stderr.write(`[squad-mcp] Dashboard: http://localhost:${dashPort}\n`);
+    });
+    dashServer.on('error', (err: any) => {
+      if (err.code === 'EADDRINUSE') {
+        process.stderr.write(`[squad-mcp] Dashboard port ${dashPort} in use, skipping\n`);
+      }
+    });
+  }
 
   // --- Start MCP protocol loop ---
   process.stderr.write('[squad-mcp] Squad MCP server ready (waiting for Copilot)\n');
