@@ -10,9 +10,10 @@
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { SquadClientWithPool } from '../client/index.js';
-import type { SquadSession, SquadSessionConfig, SquadTool } from '../adapter/types.js';
+import type { SquadSession, SquadSessionConfig, SquadTool, SquadMCPServerConfig } from '../adapter/types.js';
 import type { EventBus } from '../runtime/event-bus.js';
 import { CharterCompiler, type AgentCharter } from '../agents/index.js';
 import type { ServerPersistence, SessionRegistryEntry, ServerStateSnapshot } from './persistence.js';
@@ -34,6 +35,8 @@ export interface AgentSessionManagerConfig {
   defaultModel?: string;
   /** Working directory for agent sessions */
   workingDirectory?: string;
+  /** MCP servers to attach to agent sessions. If not provided, loaded from ~/.copilot/mcp-config.json */
+  mcpServers?: Record<string, SquadMCPServerConfig>;
 }
 
 export interface AgentSessionEntry {
@@ -69,6 +72,67 @@ export interface ActiveSessionInfo {
 // Maximum bytes of history to include in the compiled charter prompt
 const MAX_HISTORY_BYTES = 2048;
 
+/**
+ * Resolve a potentially abbreviated agent name to the full directory name
+ * under .squad/agents/. Matches by exact name, then prefix, then substring.
+ * Returns the original name if no match is found (falls back to default charter).
+ */
+function resolveAgentName(squadRoot: string, input: string): string {
+  const agentsDir = path.join(squadRoot, '.squad', 'agents');
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(agentsDir, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name as string);
+  } catch {
+    return input;
+  }
+
+  const lower = input.toLowerCase();
+  if (entries.includes(input)) return input;
+
+  const exactCI = entries.find(e => e.toLowerCase() === lower);
+  if (exactCI) return exactCI;
+
+  const prefixMatches = entries.filter(e => e.toLowerCase().startsWith(lower));
+  if (prefixMatches.length === 1) return prefixMatches[0]!;
+
+  const substringMatches = entries.filter(e => e.toLowerCase().includes(lower));
+  if (substringMatches.length === 1) return substringMatches[0]!;
+
+  return input;
+}
+
+/**
+ * Load MCP server configs from ~/.copilot/mcp-config.json.
+ * Returns a map compatible with SquadSessionConfig.mcpServers.
+ * Excludes the squad MCP server itself to avoid circular spawning.
+ */
+function loadUserMCPServers(): Record<string, SquadMCPServerConfig> | undefined {
+  const configPath = path.join(os.homedir(), '.copilot', 'mcp-config.json');
+  try {
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    const config = JSON.parse(raw) as { mcpServers?: Record<string, any> };
+    if (!config.mcpServers) return undefined;
+
+    const result: Record<string, SquadMCPServerConfig> = {};
+    for (const [name, server] of Object.entries(config.mcpServers)) {
+      if (name === 'squad') continue;
+      result[name] = {
+        command: server.command,
+        args: server.args ?? [],
+        env: server.env,
+        type: server.type ?? 'stdio',
+        tools: server.tools ?? ['*'],
+      } as SquadMCPServerConfig;
+    }
+
+    return Object.keys(result).length > 0 ? result : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ============================================================================
 // AgentSessionManager
 // ============================================================================
@@ -81,6 +145,7 @@ export class AgentSessionManager {
   private readonly defaultModel: string | undefined;
   private readonly workingDirectory: string | undefined;
   private readonly charterCompiler: CharterCompiler;
+  private readonly mcpServers: Record<string, SquadMCPServerConfig> | undefined;
 
   /** Optional persistence layer for crash recovery */
   private persistence: ServerPersistence | null = null;
@@ -97,6 +162,7 @@ export class AgentSessionManager {
     this.defaultModel = config.defaultModel;
     this.workingDirectory = config.workingDirectory;
     this.charterCompiler = new CharterCompiler();
+    this.mcpServers = config.mcpServers ?? loadUserMCPServers();
   }
 
   /**
@@ -141,23 +207,23 @@ export class AgentSessionManager {
    * Get an existing session for an agent, or create a new one.
    * Sessions are keyed by agent name — each agent has at most one active session.
    */
-  async getOrCreateSession(agentName: string): Promise<{ session: SquadSession; created: boolean }> {
-    const existing = this.sessions.get(agentName);
+  async getOrCreateSession(agentName: string): Promise<{ session: SquadSession; created: boolean; resolvedName: string }> {
+    // Resolve abbreviated names (e.g. "koba" → "kobayashi")
+    const resolved = resolveAgentName(this.squadRoot, agentName);
+
+    const existing = this.sessions.get(resolved);
     if (existing) {
-      return { session: existing.session, created: false };
+      return { session: existing.session, created: false, resolvedName: resolved };
     }
 
     // Check the pool for an orphaned session (e.g. created outside this manager)
-    const poolSession = this.client.pool.findByAgent(agentName);
+    const poolSession = this.client.pool.findByAgent(resolved);
     if (poolSession) {
-      // Pool has a session tracked by agent name but we lost our local reference.
-      // We can't recover the SquadSession handle, so remove the stale pool entry
-      // and create a fresh session.
       this.client.pool.remove(poolSession.id);
     }
 
-    const charter = await this.compileCharter(agentName);
-    const systemPrompt = await this.buildSystemPrompt(agentName, charter);
+    const charter = await this.compileCharter(resolved);
+    const systemPrompt = await this.buildSystemPrompt(resolved, charter);
 
     const sessionConfig: SquadSessionConfig = {
       model: charter.modelPreference ?? this.defaultModel,
@@ -167,19 +233,21 @@ export class AgentSessionManager {
         content: systemPrompt,
       },
       workingDirectory: this.workingDirectory ?? this.squadRoot,
+      onPermissionRequest: () => ({ kind: 'approved' as const }),
+      mcpServers: this.mcpServers,
     };
 
     const session = await this.client.createSession(sessionConfig);
 
     const now = new Date();
     const entry: AgentSessionEntry = {
-      agentName,
+      agentName: resolved,
       session,
       charter,
       createdAt: now,
       lastActiveAt: now,
     };
-    this.sessions.set(agentName, entry);
+    this.sessions.set(resolved, entry);
 
     // Persist registry after new session creation
     if (this.persistence) {
@@ -189,12 +257,12 @@ export class AgentSessionManager {
     await this.eventBus.emit({
       type: 'session:created',
       sessionId: session.sessionId,
-      agentName,
+      agentName: resolved,
       payload: { role: charter.role, model: charter.modelPreference ?? this.defaultModel },
       timestamp: now,
     });
 
-    return { session, created: true };
+    return { session, created: true, resolvedName: resolved };
   }
 
   /**
@@ -202,7 +270,7 @@ export class AgentSessionManager {
    * Returns dispatch metadata including the session ID and whether a new session was created.
    */
   async dispatch(agentName: string, message: string, context?: string): Promise<DispatchResult> {
-    const { session, created } = await this.getOrCreateSession(agentName);
+    const { session, created, resolvedName } = await this.getOrCreateSession(agentName);
 
     const prompt = context
       ? `${message}\n\n<context>\n${context}\n</context>`
@@ -211,7 +279,7 @@ export class AgentSessionManager {
     await session.sendMessage({ prompt });
 
     // Update last-active timestamp
-    const entry = this.sessions.get(agentName);
+    const entry = this.sessions.get(resolvedName);
     if (entry) {
       entry.lastActiveAt = new Date();
     }
@@ -224,7 +292,7 @@ export class AgentSessionManager {
     await this.eventBus.emit({
       type: 'session:message',
       sessionId: session.sessionId,
-      agentName,
+      agentName: resolvedName,
       payload: { direction: 'outbound', promptLength: prompt.length },
       timestamp: new Date(),
     });
@@ -232,7 +300,7 @@ export class AgentSessionManager {
     return {
       sessionId: session.sessionId,
       status: created ? 'created_and_sent' : 'sent',
-      agentName,
+      agentName: resolvedName,
     };
   }
 
