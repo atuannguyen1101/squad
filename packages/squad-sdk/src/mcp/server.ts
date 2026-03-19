@@ -406,9 +406,9 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             const { agentName, message } = JSON.parse(body);
             if (!agentName || !message) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agentName and message required' })); return; }
             const mgr = server.getSessionManager();
-            await mgr?.sendFollowUp(agentName, message);
+            const response = await mgr?.sendFollowUp(agentName, message);
             res.writeHead(200, cors);
-            res.end(JSON.stringify({ sent: true, agentName }));
+            res.end(JSON.stringify({ sent: true, agentName, response }));
           } catch (err) {
             res.writeHead(500, cors);
             res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));

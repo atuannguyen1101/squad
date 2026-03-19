@@ -483,13 +483,34 @@ export class AgentSessionManager {
   /**
    * Send a follow-up message to an existing agent session.
    */
-  async sendFollowUp(agentName: string, message: string): Promise<void> {
+  async sendFollowUp(agentName: string, message: string): Promise<string | null> {
     const resolved = resolveAgentName(this.squadRoot, agentName);
     const entry = this.sessions.get(resolved);
     if (!entry) throw new Error(`No active session for ${resolved}`);
+
     entry.messages.push({ role: 'user', content: message, timestamp: new Date().toISOString() });
-    await entry.session.sendMessage({ prompt: message });
     entry.lastActiveAt = new Date();
+
+    // Use sendAndWait if available (returns when agent finishes its turn)
+    if (entry.session.sendAndWait) {
+      try {
+        const result = await entry.session.sendAndWait({ prompt: message }, 120_000);
+        const content = typeof result === 'string' ? result
+          : result && typeof (result as any).text === 'string' ? (result as any).text
+          : result ? JSON.stringify(result) : null;
+        if (content) {
+          entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
+        }
+        return content;
+      } catch {
+        // Timeout or error — fall back to fire-and-forget
+        await entry.session.sendMessage({ prompt: message });
+        return null;
+      }
+    }
+
+    await entry.session.sendMessage({ prompt: message });
+    return null;
   }
 
   /**

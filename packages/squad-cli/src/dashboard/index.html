@@ -216,11 +216,28 @@
       if (!selectedAgent) return;
       const msg = $('sendMsg').value.trim();
       if (!msg) return;
+      const sendBtn = $('sendBar').querySelector('.btn.primary');
+      const input = $('sendMsg');
+      input.value = '';
+      input.disabled = true;
+      if (sendBtn) { sendBtn.textContent = 'Sending...'; sendBtn.disabled = true; }
+      // Optimistically show user message
+      if (!msgCache[selectedAgent]) msgCache[selectedAgent] = [];
+      msgCache[selectedAgent].push({ role: 'user', content: msg, timestamp: new Date().toISOString() });
+      renderDetail();
       try {
         const r = await fetch('/api/send', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({agentName:selectedAgent,message:msg}) });
-        if (r.ok) { $('sendMsg').value=''; setTimeout(()=>fetchMessages(selectedAgent),500); }
-        else { const d=await r.json(); alert('Failed: '+(d.error||'unknown')); }
-      } catch(e) { alert('Failed: '+e.message); }
+        const d = await r.json();
+        if (r.ok && d.response) {
+          msgCache[selectedAgent].push({ role: 'assistant', content: d.response, timestamp: new Date().toISOString() });
+          renderDetail();
+        } else if (!r.ok) {
+          alert('Failed: ' + (d.error || 'unknown'));
+        }
+        // Always refresh from server to catch event-captured messages
+        setTimeout(() => fetchMessages(selectedAgent), 1000);
+      } catch(e) { alert('Failed: ' + e.message); }
+      finally { input.disabled = false; if (sendBtn) { sendBtn.textContent = 'Send'; sendBtn.disabled = false; } input.focus(); }
     }
 
     async function doClose(name) {
