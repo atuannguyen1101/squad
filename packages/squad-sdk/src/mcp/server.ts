@@ -242,6 +242,70 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
     },
   );
 
+  // squad_roster: Discover available agents from .squad/agents/
+  mcp.addTool(
+    {
+      name: 'squad_roster',
+      description: 'List all available squad agents with their roles, expertise, and model preferences. Reads from .squad/agents/ charters. Use this to discover who is on the team before dispatching.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    async () => {
+      const agentsDir = path.join(options.squadRoot, '.squad', 'agents');
+      try {
+        const dirs = fs.readdirSync(agentsDir, { withFileTypes: true })
+          .filter((d: any) => d.isDirectory() && !d.name.startsWith('_'))
+          .map((d: any) => d.name as string);
+
+        const roster: string[] = [];
+        for (const name of dirs) {
+          const charterPath = path.join(agentsDir, name, 'charter.md');
+          try {
+            const content = fs.readFileSync(charterPath, 'utf-8');
+            const roleMatch = content.match(/^#\s+.+?\s*[-—]\s*(.+)/m)
+              || content.match(/\*\*Role:\*\*\s*(.+)/m)
+              || content.match(/Role:\s*(.+)/m);
+            const role = roleMatch?.[1]?.trim() ?? 'agent';
+
+            const expertiseMatch = content.match(/\*\*Expertise:\*\*\s*(.+)/m);
+            const expertise = expertiseMatch?.[1]?.trim() ?? '';
+
+            const modelMatch = content.match(/Preferred:\s*(.+)/m);
+            const model = modelMatch?.[1]?.trim() ?? 'auto';
+
+            roster.push(`  ${name}: ${role}${expertise ? ' | ' + expertise : ''}${model !== 'auto' ? ' [model: ' + model + ']' : ''}`);
+          } catch {
+            roster.push(`  ${name}: (no charter)`);
+          }
+        }
+
+        // Also read team.md for the full roster table if it exists
+        const teamPath = path.join(options.squadRoot, '.squad', 'team.md');
+        let teamInfo = '';
+        try {
+          const teamContent = fs.readFileSync(teamPath, 'utf-8');
+          const membersMatch = teamContent.match(/## Members[\s\S]*?(\|[\s\S]*?\|)/);
+          if (membersMatch) teamInfo = '\n\nTeam table from team.md:\n' + membersMatch[0].slice(0, 1000);
+        } catch { /* no team.md */ }
+
+        return {
+          content: [{
+            type: 'text',
+            text: roster.length > 0
+              ? `Available agents (${roster.length}):\n${roster.join('\n')}${teamInfo}`
+              : 'No agents found in .squad/agents/',
+          }],
+        };
+      } catch {
+        return {
+          content: [{ type: 'text', text: 'Could not read .squad/agents/ — is this a squad-enabled repo?' }],
+        };
+      }
+    },
+  );
+
   // --- Graceful shutdown ---
   let dashServer: http.Server | null = null;
   const shutdown = async () => {
