@@ -371,6 +371,12 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
     });
   }
 
+  // --- Eager start — connect to Copilot backend immediately ---
+  // Don't block MCP protocol — start in background, retry on dispatch if needed
+  ensureStarted().catch(() => {
+    process.stderr.write('[squad-mcp] Eager start failed — will retry on first dispatch\n');
+  });
+
   // --- Start MCP protocol loop ---
   process.stderr.write('[squad-mcp] Squad MCP server ready (waiting for Copilot)\n');
   await mcp.start();
