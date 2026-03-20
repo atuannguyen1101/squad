@@ -2,7 +2,9 @@
  * Squad MCP Server
  *
  * Wraps SquadServer as an MCP stdio server. Copilot spawns this process
- * and discovers squad_dispatch, squad_status, squad_list_agents tools.
+ * and discovers squad_dispatch, squad_send, squad_read_session, squad_decide,
+ * squad_memory, squad_status, squad_list_agents, squad_close_session,
+ * squad_monitor, and squad_roster tools.
  */
 
 import { MCPServer } from './protocol.js';
@@ -309,6 +311,191 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // --- Graceful shutdown ---
+
+  // squad_send: Send a message and wait for the agent's response
+  mcp.addTool(
+    {
+      name: 'squad_send',
+      description: 'Send a message to an existing agent session and wait for their response. Use this for synchronous back-and-forth communication between agents. The agent must already have an active session (created via squad_dispatch). Returns the agent\'s full response text.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentName: { type: 'string', description: 'Name of the target agent (must have an active session)' },
+          message: { type: 'string', description: 'The message to send to the agent' },
+        },
+        required: ['agentName', 'message'],
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      try {
+        const response = await mgr.sendFollowUp(args.agentName, args.message);
+        if (response) {
+          return {
+            content: [{ type: 'text', text: response }],
+          };
+        }
+        return {
+          content: [{ type: 'text', text: `Message sent to ${args.agentName} but no response captured (agent may still be processing). Use squad_read_session to check later.` }],
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text', text: `Failed to send to ${args.agentName}: ${msg}` }],
+        };
+      }
+    },
+  );
+
+  // squad_read_session: Read an agent's conversation history
+  mcp.addTool(
+    {
+      name: 'squad_read_session',
+      description: 'Read the conversation history of an agent session. Returns all messages (user dispatches and agent responses). Use this to check what an agent has done, read their output, or monitor progress.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentName: { type: 'string', description: 'Name of the agent whose session to read' },
+          lastN: { type: 'number', description: 'Only return the last N messages (default: all)' },
+        },
+        required: ['agentName'],
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      const messages = mgr.getMessages(args.agentName);
+      if (messages.length === 0) {
+        return {
+          content: [{ type: 'text', text: `No messages found for ${args.agentName}. Agent may not have an active session.` }],
+        };
+      }
+
+      const sliced = args.lastN ? messages.slice(-args.lastN) : messages;
+      const formatted = sliced.map((m, i) => {
+        const role = m.role === 'user' ? '→ SENT' : '← REPLY';
+        const ts = m.timestamp ? ` (${m.timestamp.slice(11, 19)})` : '';
+        const content = m.content.length > 4000
+          ? m.content.slice(0, 4000) + '\n... (truncated)'
+          : m.content;
+        return `[${i + 1}] ${role}${ts}:\n${content}`;
+      }).join('\n\n---\n\n');
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Session history for ${args.agentName} (${sliced.length}/${messages.length} messages):\n\n${formatted}`,
+        }],
+      };
+    },
+  );
+
+  // squad_decide: Record a team decision
+  mcp.addTool(
+    {
+      name: 'squad_decide',
+      description: 'Record a team decision to .squad/decisions/inbox/. Decisions are reviewed and merged into decisions.md by the team. Use this when making architectural, design, or process choices that affect other agents.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          author: { type: 'string', description: 'Agent name making the decision (e.g., "keaton")' },
+          summary: { type: 'string', description: 'Brief one-line summary of the decision' },
+          body: { type: 'string', description: 'Full decision details and rationale' },
+        },
+        required: ['author', 'summary', 'body'],
+      },
+    },
+    async (args) => {
+      try {
+        const inboxDir = path.resolve(options.squadRoot, '.squad', 'decisions', 'inbox');
+        fs.mkdirSync(inboxDir, { recursive: true });
+
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const slug = args.summary
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '')
+          .slice(0, 50);
+        const filename = path.join(inboxDir, `${args.author}-${slug}.md`);
+
+        const content = [
+          `### ${timestamp}: ${args.summary}`,
+          '',
+          `**By:** ${args.author}`,
+          `**What:** ${args.body}`,
+          '',
+        ].join('\n');
+
+        fs.writeFileSync(filename, content, 'utf-8');
+
+        return {
+          content: [{ type: 'text', text: `Decision recorded: ${filename}` }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `Failed to write decision: ${err instanceof Error ? err.message : err}` }],
+        };
+      }
+    },
+  );
+
+  // squad_memory: Append to agent history
+  mcp.addTool(
+    {
+      name: 'squad_memory',
+      description: 'Append an entry to an agent\'s history file (.squad/agents/{name}/history.md). Use to record learnings, session outcomes, or important context for future sessions.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agent: { type: 'string', description: 'Agent name whose history to update' },
+          section: { type: 'string', enum: ['learnings', 'updates', 'sessions'], description: 'Section to append to' },
+          content: { type: 'string', description: 'Content to append' },
+        },
+        required: ['agent', 'section', 'content'],
+      },
+    },
+    async (args) => {
+      try {
+        const historyFile = path.resolve(options.squadRoot, '.squad', 'agents', args.agent, 'history.md');
+
+        if (!fs.existsSync(historyFile)) {
+          return {
+            content: [{ type: 'text', text: `History file not found for ${args.agent}. File expected at: ${historyFile}` }],
+          };
+        }
+
+        const sectionHeader = `## ${args.section.charAt(0).toUpperCase() + args.section.slice(1)}`;
+        const timestamp = new Date().toISOString();
+        const entry = `\n### ${timestamp}\n${args.content}\n`;
+
+        let fileContent = fs.readFileSync(historyFile, 'utf-8');
+        const sectionIndex = fileContent.indexOf(sectionHeader);
+        if (sectionIndex !== -1) {
+          const nextSectionIndex = fileContent.indexOf('\n## ', sectionIndex + sectionHeader.length);
+          const insertIndex = nextSectionIndex === -1 ? fileContent.length : nextSectionIndex;
+          fileContent = fileContent.slice(0, insertIndex) + entry + fileContent.slice(insertIndex);
+        } else {
+          fileContent += `\n${sectionHeader}\n${entry}`;
+        }
+
+        fs.writeFileSync(historyFile, fileContent, 'utf-8');
+
+        return {
+          content: [{ type: 'text', text: `Appended to ${args.agent} history (${args.section})` }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `Failed to update history: ${err instanceof Error ? err.message : err}` }],
+        };
+      }
+    },
+  );
+
   let dashServer: http.Server | null = null;
   const shutdown = async () => {
     process.stderr.write('[squad-mcp] Shutting down...\n');

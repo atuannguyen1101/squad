@@ -2,7 +2,7 @@
  * Squad Orchestration Server
  *
  * Persistent Node.js process that manages agent sessions, enables
- * inter-agent communication via squad_route, and provides monitoring
+ * inter-agent communication via squad_dispatch/squad_send, and provides monitoring
  * via EventBus + optional RemoteBridge.
  *
  * Wires together all SDK primitives:

@@ -19,9 +19,16 @@
     .sidebar-header { padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: #8b949e; border-bottom: 1px solid #30363d; background: #1c2128; }
     .sidebar-body { flex: 1; overflow-y: auto; padding: 4px; }
     .agent-item { padding: 10px; margin: 3px 0; background: #0d1117; border-radius: 6px; border: 1px solid transparent; border-left: 3px solid #3fb950; cursor: pointer; transition: all 0.15s; }
-    .agent-item:hover { border-color: #30363d; }
-    .agent-item.selected { border-color: #58a6ff; background: #161b22; }
-    .agent-item .name { font-weight: 600; color: #58a6ff; font-size: 13px; }
+    .agent-item.idle { border-left-color: #d29922; }
+    .agent-item.stale { border-left-color: #484f58; opacity: 0.7; }
+    .agent-item:hover { border-color: #30363d; opacity: 1; }
+    .agent-item.selected { border-color: #58a6ff; background: #161b22; opacity: 1; }
+    .agent-item .name { font-weight: 600; color: #58a6ff; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+    .status-dot.working { background: #3fb950; box-shadow: 0 0 6px #3fb95066; animation: pulse 1.5s infinite; }
+    .status-dot.idle { background: #d29922; }
+    .status-dot.stale { background: #484f58; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
     .agent-item .role { font-size: 10px; color: #8b949e; }
     .agent-item .meta { font-size: 10px; color: #484f58; margin-top: 2px; }
     .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
@@ -39,7 +46,7 @@
     .event.destroyed { border-left-color: #484f58; }
     .event.message { border-left-color: #58a6ff; }
     .event.error { border-left-color: #f85149; }
-    .msg { padding: 10px 12px; margin: 6px 0; border-radius: 6px; font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; }
+    .msg { padding: 10px 12px; margin: 6px 0; border-radius: 6px; font-size: 12px; word-break: break-word; max-height: 600px; overflow-y: auto; }
     .msg.user { background: #1c2128; border: 1px solid #30363d; }
     .msg.user::before { content: 'You'; display: block; font-weight: 600; color: #d2a8ff; font-size: 11px; margin-bottom: 4px; }
     .msg.assistant { background: #0d1117; border: 1px solid #1c2128; }
@@ -56,6 +63,27 @@
     .btn.danger:hover { background: #f8514922; }
     .empty { color: #484f58; text-align: center; padding: 40px 16px; }
     .dispatch-row { display: flex; gap: 6px; padding: 6px; border-top: 1px solid #30363d; background: #1c2128; flex-shrink: 0; }
+    .tool-call { display: inline; background: #1c2128; border: 1px solid #58a6ff44; border-radius: 4px; padding: 1px 5px; font-size: 11px; }
+    .tool-icon { color: #58a6ff; font-weight: 700; }
+    .tool-name { color: #79c0ff; font-weight: 600; }
+    .tool-target { color: #d2a8ff; font-weight: 600; }
+    .subagent-badge { display: inline-block; background: #7ee78722; border: 1px solid #7ee78744; color: #7ee787; border-radius: 3px; padding: 0 4px; font-size: 10px; font-weight: 600; }
+    .cmd-badge { display: inline-block; background: #ffa65722; border: 1px solid #ffa65744; color: #ffa657; border-radius: 3px; padding: 0 4px; font-size: 10px; font-family: 'SF Mono', 'Cascadia Code', monospace; }
+    .agent-mention { color: #58a6ff; font-weight: 600; }
+    .subagent-box { margin: 6px 0; border: 1px solid #30363d; border-radius: 6px; background: #161b22; overflow: hidden; }
+    .subagent-box[open] { background: #0d1117; }
+    .subagent-summary { padding: 8px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 11px; color: #8b949e; user-select: none; list-style: none; }
+    .subagent-summary::-webkit-details-marker { display: none; }
+    .subagent-summary:hover { background: #1c2128; }
+    .subagent-icon { color: #7ee787; font-size: 8px; transition: transform 0.15s; }
+    .subagent-box[open] .subagent-icon { transform: rotate(90deg); }
+    .subagent-badge { background: #7ee78722; border: 1px solid #7ee78744; color: #7ee787; border-radius: 3px; padding: 0 5px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+    .subagent-count { color: #c9d1d9; font-weight: 600; }
+    .subagent-time { color: #484f58; font-size: 10px; }
+    .subagent-preview { color: #484f58; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+    .subagent-content { border-top: 1px solid #30363d; padding: 4px 8px; max-height: 500px; overflow-y: auto; }
+    .subagent-item { padding: 6px 8px; margin: 2px 0; font-size: 11px; border-left: 2px solid #7ee78733; padding-left: 10px; word-break: break-word; }
+    .subagent-item .ts { color: #484f58; font-size: 10px; margin-right: 6px; }
     .dispatch-row input { padding: 5px 8px; border-radius: 4px; border: 1px solid #30363d; background: #0d1117; color: #c9d1d9; font-family: inherit; font-size: 11px; }
     .dispatch-row input:first-child { width: 80px; }
     .dispatch-row input:nth-child(2) { flex: 1; }
@@ -103,6 +131,14 @@
     function ago(ts) { if (!ts) return ''; const s=~~((Date.now()-new Date(ts).getTime())/1000); if (s<60) return s+'s'; if (s<3600) return ~~(s/60)+'m'; return ~~(s/3600)+'h'; }
     function roleColor(r) { if (!r) return '#8b949e'; r=r.toLowerCase(); if (/lead|orch/.test(r)) return '#d2a8ff'; if (/ui|front|react/.test(r)) return '#7ee787'; if (/core|back|api/.test(r)) return '#ffa657'; if (/test|qa|e2e/.test(r)) return '#79c0ff'; if (/review/.test(r)) return '#f778ba'; return '#8b949e'; }
 
+    function agentStatus(a) {
+      if (!a.lastActiveAt) return { label: 'unknown', cls: 'unknown' };
+      const sec = (Date.now() - new Date(a.lastActiveAt).getTime()) / 1000;
+      if (sec < 30) return { label: 'working', cls: 'working' };
+      if (sec < 300) return { label: 'idle ' + ago(a.lastActiveAt), cls: 'idle' };
+      return { label: 'idle ' + ago(a.lastActiveAt), cls: 'stale' };
+    }
+
     function renderAgents() {
       const el = $('agentList');
       $('sessionCount').textContent = agents.length;
@@ -111,10 +147,11 @@
         const sel = a.agentName === selectedAgent ? ' selected' : '';
         const role = a.charterRole || 'agent';
         const mc = a.messageCount || 0;
-        return `<div class="agent-item${sel}" onclick="selectAgent('${a.agentName}')">
-          <div class="name">${a.agentName}</div>
+        const st = agentStatus(a);
+        return `<div class="agent-item${sel} ${st.cls}" onclick="selectAgent('${a.agentName}')">
+          <div class="name"><span class="status-dot ${st.cls}"></span>${a.agentName}</div>
           <div class="role" style="color:${roleColor(role)}">${role}</div>
-          <div class="meta">${mc} msgs | ${ago(a.lastActiveAt)} ago</div>
+          <div class="meta">${mc} msgs | ${st.label}</div>
         </div>`;
       }).join('');
     }
@@ -130,9 +167,41 @@
         const cls = t.includes('created')?'created':t.includes('destroy')||t.includes('close')?'destroyed':t.includes('error')?'error':t.includes('message')?'message':'';
         const time = e.timestamp ? e.timestamp.slice(11,19) : '';
         const ag = e.agentName ? `<span class="agent">[${e.agentName}]</span> ` : '';
-        return `<div class="event ${cls}"><span class="time">${time}</span>${ag}<span class="summary">${e.summary||e.type||''}</span></div>`;
+        let summary = escHtml(e.summary||e.type||'');
+        summary = summary.replace(/\b(Fenster|McManus|Keaton|Kobayashi|Kujan|Redfoot|Strausz)\b/g, '<span class="agent-mention">$1</span>');
+        return `<div class="event ${cls}"><span class="time">${time}</span>${ag}<span class="summary">${summary}</span></div>`;
       }).join('');
       if (atBot) el.scrollTop = el.scrollHeight;
+    }
+
+    function classifyMessage(m, idx, msgs) {
+      if (m.role !== 'assistant' || idx === 0) return 'agent';
+      const prev = msgs[idx - 1];
+      if (!prev || prev.role !== 'assistant' || !m.timestamp || !prev.timestamp) return 'agent';
+      const gap = (new Date(m.timestamp) - new Date(prev.timestamp)) / 1000;
+      const isExplore = /^(i'll help|i'll explore|let me search|let me read|let me check|let me find|let me look|let me examine|based on my|here are the|searching for|now let me|good!|perfect!|excellent!|found)/i.test(m.content || '');
+      if (gap < 8 && isExplore) return 'subagent';
+      return 'agent';
+    }
+
+    function groupMessages(msgs) {
+      const groups = [];
+      let current = null;
+      for (let i = 0; i < msgs.length; i++) {
+        const m = msgs[i];
+        const type = m.role === 'user' ? 'user' : classifyMessage(m, i, msgs);
+        if (type === 'subagent') {
+          if (!current || current.type !== 'subagent-group') {
+            current = { type: 'subagent-group', msgs: [], startTs: m.timestamp };
+            groups.push(current);
+          }
+          current.msgs.push(m);
+        } else {
+          current = { type: type, msgs: [m] };
+          groups.push(current);
+        }
+      }
+      return groups;
     }
 
     function renderDetail() {
@@ -142,16 +211,89 @@
       const msgs = msgCache[selectedAgent] || [];
       if (!msgs.length) { el.innerHTML = `<div class="empty">No messages yet for ${selectedAgent}</div>`; return; }
       const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
-      el.innerHTML = msgs.map(m => {
+      const filtered = msgs.filter(m => (m.content||'').trim().length > 0);
+      const groups = groupMessages(filtered);
+
+      el.innerHTML = groups.map((g, gi) => {
+        if (g.type === 'subagent-group') {
+          const count = g.msgs.length;
+          const startTs = g.startTs ? g.startTs.slice(11,19) : '';
+          const endTs = g.msgs[g.msgs.length-1]?.timestamp?.slice(11,19) || '';
+          const dur = g.msgs.length > 1 && g.startTs && g.msgs[g.msgs.length-1]?.timestamp
+            ? Math.round((new Date(g.msgs[g.msgs.length-1].timestamp) - new Date(g.startTs)) / 1000) + 's'
+            : '';
+          const preview = (g.msgs[g.msgs.length-1]?.content || '').slice(0, 120).replace(/\n/g, ' ');
+          const inner = g.msgs.map(m => {
+            const ts = m.timestamp ? m.timestamp.slice(11,19) : '';
+            const content = (m.content||'').length > 4000 ? m.content.slice(0,4000)+'...' : m.content||'';
+            return `<div class="subagent-item"><span class="ts">${ts}</span>${renderMd(content)}</div>`;
+          }).join('');
+          return `<details class="subagent-box">
+            <summary class="subagent-summary">
+              <span class="subagent-icon">&#9654;</span>
+              <span class="subagent-badge">sub-agents</span>
+              <span class="subagent-count">${count} messages</span>
+              <span class="subagent-time">${startTs}–${endTs} (${dur})</span>
+              <span class="subagent-preview">${escHtml(preview)}...</span>
+            </summary>
+            <div class="subagent-content">${inner}</div>
+          </details>`;
+        }
+        const m = g.msgs[0];
         const ts = m.timestamp ? m.timestamp.slice(11,19) : '';
         const cls = m.role === 'user' ? 'user' : 'assistant';
-        const content = (m.content||'').length > 2000 ? m.content.slice(0,2000)+'...' : m.content||'';
-        return `<div class="msg ${cls}" data-agent="${selectedAgent}"><span class="ts">${ts}</span>${escHtml(content)}</div>`;
+        const content = (m.content||'').length > 8000 ? m.content.slice(0,8000)+'...' : m.content||'';
+        return `<div class="msg ${cls}" data-agent="${selectedAgent}"><span class="ts">${ts}</span>${renderMd(content)}</div>`;
       }).join('');
       if (atBot) el.scrollTop = el.scrollHeight;
     }
 
     function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    function renderMd(s) {
+      let h = escHtml(s);
+      // Code blocks: ```...```
+      h = h.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre style="background:#161b22;padding:8px;border-radius:4px;overflow-x:auto;margin:4px 0;font-size:11px"><code>$2</code></pre>');
+      // Inline code: `...`
+      h = h.replace(/`([^`]+)`/g, '<code style="background:#161b22;padding:1px 4px;border-radius:3px;font-size:11px">$1</code>');
+      // Bold: **...**
+      h = h.replace(/\*\*([^*]+)\*\*/g, '<strong style="color:#e6edf3">$1</strong>');
+      // Headers: ## ... (at line start)
+      h = h.replace(/^### (.+)$/gm, '<div style="color:#d2a8ff;font-weight:600;margin-top:8px">$1</div>');
+      h = h.replace(/^## (.+)$/gm, '<div style="color:#d2a8ff;font-weight:600;font-size:13px;margin-top:8px">$1</div>');
+      h = h.replace(/^# (.+)$/gm, '<div style="color:#e6edf3;font-weight:700;font-size:14px;margin-top:8px">$1</div>');
+      // Squad tool calls: squad_dispatch, squad_send, squad_read_session, squad_route, squad_decide, squad_memory
+      h = h.replace(/\b(squad_dispatch|squad_send|squad_read_session|squad_route|squad_decide|squad_memory|squad_close_session)\s*\(\s*[&quot;"']?(\w+)[&quot;"']?/g,
+        '<span class="tool-call"><span class="tool-icon">&#x2192;</span> <span class="tool-name">$1</span>(<span class="tool-target">$2</span>');
+      // Sub-agent spawns: task tool, feature-code-writer, build-verifier, etc
+      h = h.replace(/\b(feature-code-writer|build-verifier|dev-server-smoke|pr-pipeline-creator|pr-comment-resolver|pr-fresh-reviewer|CoverageTestGenerator|jest-writer)\b/g,
+        '<span class="subagent-badge">$1</span>');
+      // Tool usage: executeArm, tsgo, npx, vitest, playwright
+      h = h.replace(/\b(executeArm|tsgo --noEmit|npx tsgo|npx vitest|npx playwright|ap start|ap build)\b/g,
+        '<span class="cmd-badge">$1</span>');
+      // Status indicators
+      h = h.replace(/[✅✓]/g, '<span style="color:#3fb950">$&</span>');
+      h = h.replace(/[❌✗]/g, '<span style="color:#f85149">$&</span>');
+      h = h.replace(/[⏳⏸️🔄]/g, '<span style="color:#d29922">$&</span>');
+      // Agent name mentions: @fenster, @mcmanus, @keaton etc
+      h = h.replace(/\b(Fenster|McManus|Keaton|Kobayashi|Kujan|Redfoot|Strausz|Verbal|Hockney|Scribe)\b/g,
+        '<span class="agent-mention">$1</span>');
+      // List items: - ... or * ... or 1. ...
+      h = h.replace(/^(\s*)[-*] (.+)$/gm, '$1<span style="color:#8b949e">&#x2022;</span> $2');
+      h = h.replace(/^(\s*)\d+\. (.+)$/gm, '$1<span style="color:#8b949e">&#x2022;</span> $2');
+      // Table rows: | ... | ... |
+      h = h.replace(/^\|(.+)\|$/gm, (m, inner) => {
+        const cells = inner.split('|').map(c => `<td style="padding:2px 8px;border:1px solid #30363d">${c.trim()}</td>`).join('');
+        return `<tr>${cells}</tr>`;
+      });
+      // Wrap consecutive <tr> in <table>
+      h = h.replace(/((?:<tr>.*<\/tr>\n?)+)/g, '<table style="border-collapse:collapse;margin:4px 0;font-size:11px">$1</table>');
+      // Separator lines (---)
+      h = h.replace(/^-{3,}$/gm, '<hr style="border:none;border-top:1px solid #30363d;margin:6px 0">');
+      // Line breaks
+      h = h.replace(/\n/g, '<br>');
+      return h;
+    }
 
     function switchTab(tab) {
       currentTab = tab;
@@ -166,13 +308,48 @@
       $('dAgent').value = name;
       renderAgents();
       switchTab('detail');
+      const a = agents.find(x => x.agentName === name);
+      const st = a ? agentStatus(a) : { cls: 'unknown' };
+      const input = $('sendMsg');
+      input.placeholder = st.cls === 'idle' || st.cls === 'stale'
+        ? `Wake up ${name} with a message...`
+        : `Send follow-up to ${name}...`;
       await fetchMessages(name);
     }
 
     async function fetchMessages(name) {
       try {
         const res = await fetch(`/api/sessions/${encodeURIComponent(name)}`);
-        if (res.ok) { const d = await res.json(); msgCache[name] = d.messages || []; renderDetail(); }
+        if (res.ok) {
+          const d = await res.json();
+          const newMsgs = d.messages || [];
+          const oldMsgs = msgCache[name] || [];
+          // Only re-render if message count changed
+          if (newMsgs.length !== oldMsgs.length) {
+            // Save open details states and scroll position
+            const el = $('contentBody');
+            const openStates = new Set();
+            el.querySelectorAll('details.subagent-box').forEach((det, i) => {
+              if (det.open) openStates.add(i);
+            });
+            const scrollTop = el.scrollTop;
+            const wasAtBottom = scrollTop + el.clientHeight >= el.scrollHeight - 40;
+
+            msgCache[name] = newMsgs;
+            renderDetail();
+
+            // Restore open details states
+            el.querySelectorAll('details.subagent-box').forEach((det, i) => {
+              if (openStates.has(i)) det.open = true;
+            });
+            // Restore scroll: stay at bottom if was at bottom, otherwise restore position
+            if (wasAtBottom) {
+              el.scrollTop = el.scrollHeight;
+            } else {
+              el.scrollTop = scrollTop;
+            }
+          }
+        }
       } catch {}
     }
 
@@ -188,7 +365,13 @@
         if (res.ok) {
           const d = await res.json();
           setStatus(d.running||d.started?'connected':'error', d.uptime);
-          if (d.agents) { agents = d.agents; renderAgents(); }
+          if (d.agents) {
+            agents = d.agents;
+            const working = agents.filter(a => agentStatus(a).cls === 'working').length;
+            const idle = agents.length - working;
+            $('sessionCount').innerHTML = `${agents.length}` + (agents.length > 0 ? ` <span style="font-weight:normal;color:#8b949e">(${working} working, ${idle} idle)</span>` : '');
+            renderAgents();
+          }
           if (d.recentEvents) {
             let added = false;
             for (const e of d.recentEvents) {

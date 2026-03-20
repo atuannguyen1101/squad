@@ -216,7 +216,7 @@ export class ToolRegistry {
         const dispatch = this.dispatchGetter?.();
         if (!dispatch) {
           // Fallback: no server connected, write to mailbox file instead
-          const mailboxDir = path.join(this.squadRoot, 'mailbox', args.targetAgent);
+          const mailboxDir = path.join(this.squadRoot, '.squad', 'mailbox', args.targetAgent);
           fs.mkdirSync(mailboxDir, { recursive: true });
           const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
           const filename = path.join(mailboxDir, `${timestamp}-route.md`);
@@ -291,7 +291,7 @@ export class ToolRegistry {
       },
       handler: async (args) => {
         try {
-          const inboxDir = path.join(this.squadRoot, 'decisions', 'inbox');
+          const inboxDir = path.join(this.squadRoot, '.squad', 'decisions', 'inbox');
           fs.mkdirSync(inboxDir, { recursive: true });
 
           const decisionId = randomUUID();
@@ -358,7 +358,7 @@ export class ToolRegistry {
       },
       handler: async (args) => {
         try {
-          const historyFile = path.join(this.squadRoot, 'agents', args.agent, 'history.md');
+          const historyFile = path.join(this.squadRoot, '.squad', 'agents', args.agent, 'history.md');
           
           if (!fs.existsSync(historyFile)) {
             return {

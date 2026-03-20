@@ -404,17 +404,33 @@ export class AgentSessionManager {
       sections.push('');
     }
 
-    // 5. Available squad tools
+    // 5. Available squad tools (SDK-injected)
     const toolNames = this.tools.map(t => t.name);
-    if (toolNames.length > 0) {
-      sections.push('## Available Squad Tools\n');
-      sections.push(`You have access to these squad coordination tools: ${toolNames.join(', ')}`);
-      sections.push('Use squad_route to delegate work to other agents in the team.');
-      sections.push('Use squad_decide to record team decisions.');
-      sections.push('Use squad_memory to record learnings for future sessions.');
-      sections.push('Use squad_status to check on other agents and sessions.');
+    const hasSDKTools = toolNames.some(n => n === 'squad_route');
+
+    // 6. Squad communication tools
+    // When running under MCP server, agents get MCP tools (squad_dispatch, squad_send, etc.)
+    // When running standalone, agents get SDK tools (squad_route, squad_decide, etc.)
+    // We always document MCP tools since this server runs under MCP.
+    // If SDK tools are also present, note the overlap to avoid confusion.
+    sections.push('## Squad Communication\n');
+    sections.push('You can communicate with other squad members using these tools:');
+    sections.push('- `squad_dispatch(agentName, message)` — Send a task to another agent (fire-and-forget). Creates their session if needed.');
+    sections.push('- `squad_send(agentName, message)` — Send a message and wait for the response. Use for coordination and handoffs.');
+    sections.push('- `squad_read_session(agentName)` — Read an agent\'s conversation history. Use to check progress or get results.');
+    sections.push('- `squad_decide(author, summary, body)` — Record a team decision to .squad/decisions/inbox/.');
+    sections.push('- `squad_memory(agent, section, content)` — Append to an agent\'s history for future sessions.');
+    sections.push('- `squad_status()` — Check server status, active agents, and recent activity.');
+    sections.push('- `squad_list_agents()` — List all active agent sessions.');
+    sections.push('- `squad_roster()` — Discover available agents from .squad/agents/ charters.');
+    sections.push('- `squad_close_session(agentName)` — Close an agent\'s session when their work is done.');
+    sections.push('- `squad_monitor()` — View recent server events for debugging.');
+    if (hasSDKTools) {
       sections.push('');
+      sections.push('**Note:** You may also see `squad_route` — it does the same as `squad_dispatch`. Prefer `squad_dispatch`.');
+      sections.push('You may see SDK versions of `squad_decide`/`squad_memory` — prefer the MCP versions listed above.');
     }
+    sections.push('');
 
     return sections.join('\n');
   }
