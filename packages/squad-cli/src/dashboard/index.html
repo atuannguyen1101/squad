@@ -37,20 +37,20 @@
     .tab:hover { color: #c9d1d9; }
     .tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
     .content-body { flex: 1; overflow-y: auto; padding: 8px 12px; }
-    .event { padding: 5px 8px; margin: 1px 0; font-size: 12px; border-radius: 3px; border-left: 2px solid transparent; }
-    .event:hover { background: #161b22; }
-    .event .time { color: #484f58; margin-right: 6px; font-size: 11px; }
+    .event { padding: 8px 10px; margin: 4px 0; font-size: 12px; border-radius: 6px; border-left: 3px solid transparent; background: #161b22; border: 1px solid #21262d; border-left: 3px solid transparent; }
+    .event:hover { background: #1c2128; }
+    .event .time { color: #484f58; margin-right: 8px; font-size: 11px; }
     .event .agent { color: #58a6ff; font-weight: 600; }
     .event .summary { color: #8b949e; }
     .event.created { border-left-color: #3fb950; }
     .event.destroyed { border-left-color: #484f58; }
     .event.message { border-left-color: #58a6ff; }
     .event.error { border-left-color: #f85149; }
-    .msg { padding: 10px 12px; margin: 6px 0; border-radius: 6px; font-size: 12px; word-break: break-word; max-height: 600px; overflow-y: auto; }
-    .msg.user { background: #1c2128; border: 1px solid #30363d; }
-    .msg.user::before { content: 'You'; display: block; font-weight: 600; color: #d2a8ff; font-size: 11px; margin-bottom: 4px; }
-    .msg.assistant { background: #0d1117; border: 1px solid #1c2128; }
-    .msg.assistant::before { content: attr(data-agent); display: block; font-weight: 600; color: #58a6ff; font-size: 11px; margin-bottom: 4px; }
+    .msg { padding: 14px 16px; margin: 10px 0; border-radius: 8px; font-size: 12px; word-break: break-word; max-height: 600px; overflow-y: auto; }
+    .msg.user { background: #1c2128; border: 1px solid #30363d; border-left: 3px solid #d2a8ff; }
+    .msg.user::before { content: 'You'; display: block; font-weight: 600; color: #d2a8ff; font-size: 11px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .msg.assistant { background: #0d1117; border: 1px solid #30363d; border-left: 3px solid #58a6ff; }
+    .msg.assistant::before { content: attr(data-agent); display: block; font-weight: 600; color: #58a6ff; font-size: 11px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
     .msg .ts { font-size: 10px; color: #484f58; float: right; }
     .input-bar { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid #30363d; background: #161b22; flex-shrink: 0; }
     .input-bar input { flex: 1; padding: 8px 10px; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: #c9d1d9; font-family: inherit; font-size: 12px; }
