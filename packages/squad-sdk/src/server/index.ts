@@ -121,6 +121,22 @@ export class SquadServer {
           return { sessionId: result.sessionId, status: result.status };
         };
       },
+      // sendFollowUpGetter — returns the sendFollowUp function for squad_send
+      () => {
+        if (!this.sessionManager) return undefined;
+        const mgr = this.sessionManager;
+        return async (agentName: string, message: string) => {
+          return mgr.sendFollowUp(agentName, message);
+        };
+      },
+      // getMessagesGetter — returns the getMessages function for squad_read_session
+      () => {
+        if (!this.sessionManager) return undefined;
+        const mgr = this.sessionManager;
+        return (agentName: string) => {
+          return mgr.getMessages(agentName);
+        };
+      },
     );
   }
 

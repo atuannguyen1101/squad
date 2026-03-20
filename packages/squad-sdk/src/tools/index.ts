@@ -163,15 +163,21 @@ export class ToolRegistry {
   private squadRoot: string;
   private sessionPoolGetter?: () => any;
   private dispatchGetter?: () => ((agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string }>) | undefined;
+  private sendFollowUpGetter?: () => ((agentName: string, message: string) => Promise<string | null>) | undefined;
+  private getMessagesGetter?: () => ((agentName: string) => { role: string; content: string; timestamp: string }[]) | undefined;
 
   constructor(
     squadRoot = '.squad',
     sessionPoolGetter?: () => any,
     dispatchGetter?: () => ((agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string }>) | undefined,
+    sendFollowUpGetter?: () => ((agentName: string, message: string) => Promise<string | null>) | undefined,
+    getMessagesGetter?: () => ((agentName: string) => { role: string; content: string; timestamp: string }[]) | undefined,
   ) {
     this.squadRoot = squadRoot;
     this.sessionPoolGetter = sessionPoolGetter;
     this.dispatchGetter = dispatchGetter;
+    this.sendFollowUpGetter = sendFollowUpGetter;
+    this.getMessagesGetter = getMessagesGetter;
     this.registerSquadTools();
   }
 
@@ -604,8 +610,100 @@ export class ToolRegistry {
       },
     });
 
+    // squad_send: Send a message and wait for response
+    const squadSend = defineTool<{ agentName: string; message: string }>({
+      name: 'squad_send',
+      description: 'Send a message to an existing agent session and wait for their response. Use for coordination, handoffs, and checking results.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agentName: { type: 'string', description: 'Name of the target agent (must have an active session)' },
+          message: { type: 'string', description: 'The message to send to the agent' },
+        },
+        required: ['agentName', 'message'],
+      },
+      handler: async (args) => {
+        const sendFn = this.sendFollowUpGetter?.();
+        if (!sendFn) {
+          return {
+            textResultForLlm: 'squad_send not available — server not connected.',
+            resultType: 'failure',
+            error: 'No sendFollowUp function available',
+          };
+        }
+        try {
+          const response = await sendFn(args.agentName, args.message);
+          if (response) {
+            return { textResultForLlm: response, resultType: 'success' };
+          }
+          return {
+            textResultForLlm: `Message sent to ${args.agentName} but no response captured. Use squad_read_session to check later.`,
+            resultType: 'success',
+          };
+        } catch (error) {
+          return {
+            textResultForLlm: `Failed to send to ${args.agentName}: ${error instanceof Error ? error.message : error}`,
+            resultType: 'failure',
+            error: String(error),
+          };
+        }
+      },
+    });
+
+    // squad_read_session: Read agent conversation history
+    const squadReadSession = defineTool<{ agentName: string; lastN?: number }>({
+      name: 'squad_read_session',
+      description: 'Read the conversation history of an agent session. Returns messages (dispatches and replies). Use to check progress or get results.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agentName: { type: 'string', description: 'Name of the agent whose session to read' },
+          lastN: { type: 'number', description: 'Only return the last N messages (default: all)' },
+        },
+        required: ['agentName'],
+      },
+      handler: async (args) => {
+        const getMsgsFn = this.getMessagesGetter?.();
+        if (!getMsgsFn) {
+          return {
+            textResultForLlm: 'squad_read_session not available — server not connected.',
+            resultType: 'failure',
+            error: 'No getMessages function available',
+          };
+        }
+        try {
+          const messages = getMsgsFn(args.agentName);
+          if (messages.length === 0) {
+            return {
+              textResultForLlm: `No messages found for ${args.agentName}. Agent may not have an active session.`,
+              resultType: 'success',
+            };
+          }
+          const sliced = args.lastN ? messages.slice(-args.lastN) : messages;
+          const formatted = sliced.map((m, i) => {
+            const role = m.role === 'user' ? '→ SENT' : '← REPLY';
+            const ts = m.timestamp ? ` (${m.timestamp.slice(11, 19)})` : '';
+            const content = m.content.length > 4000 ? m.content.slice(0, 4000) + '\n... (truncated)' : m.content;
+            return `[${i + 1}] ${role}${ts}:\n${content}`;
+          }).join('\n\n---\n\n');
+          return {
+            textResultForLlm: `Session history for ${args.agentName} (${sliced.length}/${messages.length} messages):\n\n${formatted}`,
+            resultType: 'success',
+          };
+        } catch (error) {
+          return {
+            textResultForLlm: `Failed to read session for ${args.agentName}: ${error instanceof Error ? error.message : error}`,
+            resultType: 'failure',
+            error: String(error),
+          };
+        }
+      },
+    });
+
     // Register all tools
     this.tools.set('squad_route', squadRoute);
+    this.tools.set('squad_send', squadSend);
+    this.tools.set('squad_read_session', squadReadSession);
     this.tools.set('squad_decide', squadDecide);
     this.tools.set('squad_memory', squadMemory);
     this.tools.set('squad_status', squadStatus);
