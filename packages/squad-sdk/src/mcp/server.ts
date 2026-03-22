@@ -764,8 +764,9 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           text: [
             `Pipeline started: ${phases.map(p => `${p.id}(${p.agent})`).join(' → ')}`,
             `Intent: ${args.message}`,
+            dashboardUrl ? `Dashboard: ${dashboardUrl}` : null,
             'Use squad_wait to monitor progress.',
-          ].join('\n'),
+          ].filter(Boolean).join('\n'),
         }],
       };
     },
