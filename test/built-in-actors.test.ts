@@ -10,14 +10,16 @@ import {
 } from '../packages/squad-sdk/src/agents/built-in-actors.js';
 
 describe('Built-in Actors', () => {
-  it('should include ben and sage', () => {
+  it('should include ben, coordinator, and sage', () => {
     const names = getBuiltInActorNames();
     expect(names).toContain('ben');
+    expect(names).toContain('coordinator');
     expect(names).toContain('sage');
   });
 
   it('should identify built-in actors by name', () => {
     expect(isBuiltInActor('ben')).toBe(true);
+    expect(isBuiltInActor('coordinator')).toBe(true);
     expect(isBuiltInActor('sage')).toBe(true);
     expect(isBuiltInActor('fenster')).toBe(false);
     expect(isBuiltInActor('random')).toBe(false);
@@ -25,6 +27,7 @@ describe('Built-in Actors', () => {
 
   it('should be case-insensitive', () => {
     expect(isBuiltInActor('Ben')).toBe(true);
+    expect(isBuiltInActor('COORDINATOR')).toBe(true);
     expect(isBuiltInActor('SAGE')).toBe(true);
   });
 
@@ -50,6 +53,16 @@ describe('Built-in Actors', () => {
 
   it('should return undefined for unknown actors', () => {
     expect(getBuiltInActor('unknown')).toBeUndefined();
+  });
+
+  it('coordinator charter should return JSON format', () => {
+    const coord = getBuiltInActor('coordinator');
+    expect(coord).toBeDefined();
+    expect(coord!.name).toBe('coordinator');
+    expect(coord!.role).toBe('Work Router');
+    expect(coord!.charter).toContain('implementer');
+    expect(coord!.charter).toContain('reviewer');
+    expect(coord!.charter).toContain('JSON');
   });
 
   it('sage charter should cover all 5 analysis scopes', () => {

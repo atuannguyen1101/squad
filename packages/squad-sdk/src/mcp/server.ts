@@ -14,7 +14,6 @@ import { createPulse, formatPulseForUser, type PulsePhase, type PulseStatus } fr
 import { createEmptyIntentGraph, serializeIntentGraph, type IntentGraph } from '../intent/index.js';
 import { PipelineRunner, type PipelineDefinition, type PipelineRunnerDeps } from '../pipeline/index.js';
 import { analyzeRun, formatAnalysisReport, type SessionSnapshot } from './analyze-run.js';
-import { parseRoutingMarkdown, compileRoutingRules, matchRoute } from '../config/routing.js';
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -562,7 +561,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         : '';
 
       const agentsDir = path.join(options.squadRoot, '.squad', 'agents');
-      let agents: { name: string; role: string }[] = [];
+      let agentRoster: { name: string; role: string }[] = [];
       try {
         const dirs = fs.readdirSync(agentsDir, { withFileTypes: true })
           .filter((d: any) => d.isDirectory() && !d.name.startsWith('_'));
@@ -573,46 +572,24 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             const roleMatch = content.match(/\*\*Role:\*\*\s*(.+)/m)
               || content.match(/Role:\s*(.+)/m)
               || content.match(/^#\s+.+?\s*[-—]\s*(.+)/m);
-            agents.push({ name: d.name as string, role: roleMatch?.[1]?.trim() ?? '' });
-          } catch { agents.push({ name: d.name as string, role: '' }); }
+            agentRoster.push({ name: d.name as string, role: roleMatch?.[1]?.trim() ?? '' });
+          } catch { agentRoster.push({ name: d.name as string, role: '' }); }
         }
       } catch { /* no agents dir */ }
 
-      const findByRole = (pattern: RegExp) => agents.find(a => pattern.test(a.role))?.name ?? null;
-
-      let architectName: string | null = null;
-      let implementerName: string | undefined;
-      let reviewerName!: string;
-
-      const routingPath = path.join(options.squadRoot, '.squad', 'routing.md');
-      let routedViaCoordinator = false;
-      try {
-        const routingContent = fs.readFileSync(routingPath, 'utf-8');
-        const routingConfig = parseRoutingMarkdown(routingContent);
-        if (routingConfig.rules.length > 0) {
-          const compiled = compileRoutingRules(routingConfig);
-          const match = matchRoute(args.message + (contextAddendum || ''), compiled);
-          if (match.confidence !== 'low' && match.agents.length > 0) {
-            const cleanName = (n: string) => n.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
-            const matched = match.agents.map(cleanName);
-            implementerName = matched[0];
-            reviewerName = matched[1] ?? implementerName!;
-            routedViaCoordinator = true;
-          }
-        }
-      } catch { /* no routing.md or parse error */ }
-
-      if (!routedViaCoordinator) {
-        architectName = findByRole(/architect/i);
-        implementerName = findByRole(/SDK.*Dev|developer/i) ?? findByRole(/dev|engineer/i) ?? agents[0]?.name;
-        reviewerName = findByRole(/reviewer/i) ?? findByRole(/review|quality|standards/i) ?? agents[1]?.name ?? implementerName!;
-      }
-
-      if (!implementerName) {
+      if (agentRoster.length === 0) {
         return {
           content: [{ type: 'text', text: 'No agents found. Create at least one agent with a charter in .squad/agents/ before running.' }],
         };
       }
+
+      let routingContext = '';
+      try {
+        const routingPath = path.join(options.squadRoot, '.squad', 'routing.md');
+        routingContext = fs.readFileSync(routingPath, 'utf-8');
+      } catch { /* no routing.md */ }
+
+      const rosterSummary = agentRoster.map(a => `- ${a.name}: ${a.role}`).join('\n');
 
       const waitForResponse = async (agentName: string, timeoutMs: number): Promise<string | null> => {
         const startCount = mgr.getMessages(agentName).filter((m: any) => m.role === 'assistant').length;
@@ -683,66 +660,38 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           },
           timeout: 120_000,
         },
-      ];
-
-      if (architectName) {
-        phases.push({
-          id: 'plan',
-          agent: architectName,
+        {
+          id: 'route',
+          agent: 'coordinator',
           task: [
-            'Review this plan for feasibility and gaps before implementation starts.',
-            `Request: ${args.message}${contextAddendum}`,
+            'Pick the best agents from this workspace roster to implement and review the following task.',
             '',
-            'Use squad_read_session to read Ben\'s understanding.',
-            'Check: Is the scope clear? Are there architectural concerns? Missing edge cases?',
-            'Respond with approval or specific gaps that need addressing.',
+            `Task: ${args.message}${contextAddendum}`,
+            '',
+            'Available agents:',
+            rosterSummary,
+            '',
+            routingContext ? `Routing rules:\n${routingContext.slice(0, 2000)}` : 'No routing.md found.',
+            '',
+            'Respond with ONLY a JSON object, nothing else:',
+            '{"implementer": "agent_name", "reviewer": "agent_name", "architect": null}',
+            '',
+            'Pick the agent whose role best matches the task. If unsure, pick the first developer-like agent for implementer and first reviewer-like agent for reviewer.',
           ].join('\n'),
           dependsOn: ['understand'],
           gate: {
-            validate: (o: unknown) => typeof o === 'string' && (o as string).length > 20,
-            description: 'Architect must produce feasibility assessment',
+            validate: (o: unknown) => {
+              if (typeof o !== 'string') return false;
+              try {
+                const parsed = JSON.parse(o.match(/\{[\s\S]*\}/)?.[0] ?? '');
+                return parsed.implementer && parsed.reviewer;
+              } catch { return false; }
+            },
+            description: 'Coordinator must return valid JSON with implementer and reviewer',
           },
-          timeout: 180_000,
-        });
-      }
-
-      phases.push({
-        id: 'implement',
-        agent: implementerName,
-        task: [
-          `Implement the following request:`,
-          `${args.message}${contextAddendum}`,
-          '',
-          'Write code, add tests, and verify the build passes.',
-          'Use squad_pulse to report progress at milestones.',
-          'When done, emit squad_pulse with phase "done" listing the files you created or modified.',
-        ].join('\n'),
-        dependsOn: architectName ? ['plan'] : ['understand'],
-        gate: {
-          validate: (o: unknown) => typeof o === 'string' && (o as string).length > 50,
-          description: 'Implementer must produce substantial output describing what was built',
+          timeout: 60_000,
         },
-        timeout: 300_000,
-      });
-
-      phases.push({
-        id: 'review',
-        agent: reviewerName,
-        task: [
-          `Review the implementation for the following request:`,
-          `${args.message}`,
-          '',
-          `Use squad_read_session to read ${implementerName}'s session and see what was built.`,
-          'Check: code quality, test coverage, pattern consistency, type safety.',
-          'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
-        ].join('\n'),
-        dependsOn: ['implement'],
-        gate: {
-          validate: (o: unknown) => typeof o === 'string' && (o as string).length > 20,
-          description: 'Reviewer must produce a substantive review',
-        },
-        timeout: 300_000,
-      });
+      ];
 
       const pipelineDefinition: PipelineDefinition = {
         id: `run-${Date.now()}`,
@@ -751,7 +700,63 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       };
 
       const pipeline = new PipelineRunner(pipelineDefinition, pipelineDeps);
-      pipeline.run().catch((err) => {
+
+      pipeline.run().then(async (state) => {
+        const routeResult = state.phaseResults.get('route');
+        if (routeResult?.status !== 'completed' || !routeResult.output) return;
+
+        let routing: { implementer: string; reviewer: string; architect?: string | null };
+        try {
+          const jsonStr = (routeResult.output as string).match(/\{[\s\S]*\}/)?.[0] ?? '';
+          routing = JSON.parse(jsonStr);
+        } catch { return; }
+
+        const implName = routing.implementer.toLowerCase();
+        const revName = routing.reviewer.toLowerCase();
+
+        const implPhases: import('../pipeline/types.js').PhaseDefinition[] = [
+          {
+            id: 'implement',
+            agent: implName,
+            task: [
+              `Implement the following request:`,
+              `${args.message}${contextAddendum}`,
+              '',
+              'Write code, add tests, and verify the build passes.',
+              'Use squad_pulse to report progress at milestones.',
+              'When done, emit squad_pulse with phase "done" listing the files you created or modified.',
+            ].join('\n'),
+            gate: {
+              validate: (o: unknown) => typeof o === 'string' && (o as string).length > 50,
+              description: 'Implementer must produce substantial output',
+            },
+            timeout: 300_000,
+          },
+          {
+            id: 'review',
+            agent: revName,
+            task: [
+              `Review the implementation for: ${args.message}`,
+              '',
+              `Use squad_read_session to read ${implName}'s session and see what was built.`,
+              'Check: code quality, test coverage, pattern consistency, type safety.',
+              'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
+            ].join('\n'),
+            dependsOn: ['implement'],
+            gate: {
+              validate: (o: unknown) => typeof o === 'string' && (o as string).length > 20,
+              description: 'Reviewer must produce a substantive review',
+            },
+            timeout: 300_000,
+          },
+        ];
+
+        const implPipeline = new PipelineRunner(
+          { id: `impl-${Date.now()}`, name: 'Implementation', phases: implPhases },
+          pipelineDeps,
+        );
+        await implPipeline.run();
+      }).catch((err) => {
         pulseCollector.record(createPulse({
           agent: 'ben', phase: 'blocked', status: 'error', progressPct: 0,
           summary: `Pipeline error: ${err instanceof Error ? err.message : String(err)}`,
@@ -763,8 +768,9 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         content: [{
           type: 'text',
           text: [
-            `Pipeline started: ${phases.map(p => `${p.id}(${p.agent})`).join(' → ')}`,
+            `Pipeline started: understand(ben) → route(coordinator) → implement + review (selected by coordinator)`,
             `Intent: ${args.message}`,
+            `Roster: ${rosterSummary.split('\n').length} agents available`,
             dashboardUrl ? `Dashboard: ${dashboardUrl}` : null,
             'Use squad_wait to monitor progress.',
           ].filter(Boolean).join('\n'),
