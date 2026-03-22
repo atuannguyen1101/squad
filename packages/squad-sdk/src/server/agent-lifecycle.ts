@@ -16,7 +16,10 @@ import type { SquadClientWithPool } from '../client/index.js';
 import type { SquadSession, SquadSessionConfig, SquadTool, SquadMCPServerConfig } from '../adapter/types.js';
 import type { EventBus } from '../runtime/event-bus.js';
 import { CharterCompiler, type AgentCharter } from '../agents/index.js';
+import { getBuiltInActor } from '../agents/built-in-actors.js';
 import type { ServerPersistence, SessionRegistryEntry, ServerStateSnapshot } from './persistence.js';
+import { CeremonyTriggerEngine } from './ceremony-triggers.js';
+import type { CeremonyConfig } from '../config/schema.js';
 
 // ============================================================================
 // Types
@@ -37,6 +40,8 @@ export interface AgentSessionManagerConfig {
   workingDirectory?: string;
   /** MCP servers to attach to agent sessions. If not provided, loaded from ~/.copilot/mcp-config.json */
   mcpServers?: Record<string, SquadMCPServerConfig>;
+  /** Ceremony configurations for auto-dispatch after pipeline completion */
+  ceremonies?: CeremonyConfig[];
 }
 
 export interface SessionMessage {
@@ -127,13 +132,27 @@ function loadUserMCPServers(): Record<string, SquadMCPServerConfig> | undefined 
     const result: Record<string, SquadMCPServerConfig> = {};
     for (const [name, server] of Object.entries(config.mcpServers)) {
       if (name === 'squad') continue;
-      result[name] = {
-        command: server.command,
-        args: server.args ?? [],
-        env: server.env,
-        type: server.type ?? 'stdio',
-        tools: server.tools ?? ['*'],
-      } as SquadMCPServerConfig;
+      const serverType = server.type ?? 'stdio';
+
+      if (serverType === 'http' || serverType === 'sse') {
+        // Remote MCP server
+        result[name] = {
+          type: serverType,
+          url: server.url,
+          headers: server.headers,
+          tools: server.tools ?? ['*'],
+        } as SquadMCPServerConfig;
+      } else {
+        // Local/stdio MCP server
+        result[name] = {
+          command: server.command,
+          args: server.args ?? [],
+          env: server.env,
+          cwd: server.cwd,
+          type: serverType,
+          tools: server.tools ?? ['*'],
+        } as SquadMCPServerConfig;
+      }
     }
 
     return Object.keys(result).length > 0 ? result : undefined;
@@ -155,6 +174,7 @@ export class AgentSessionManager {
   private readonly workingDirectory: string | undefined;
   private readonly charterCompiler: CharterCompiler;
   private readonly mcpServers: Record<string, SquadMCPServerConfig> | undefined;
+  private readonly ceremonyEngine: CeremonyTriggerEngine | null;
 
   /** Optional persistence layer for crash recovery */
   private persistence: ServerPersistence | null = null;
@@ -172,6 +192,13 @@ export class AgentSessionManager {
     this.workingDirectory = config.workingDirectory;
     this.charterCompiler = new CharterCompiler();
     this.mcpServers = config.mcpServers ?? loadUserMCPServers();
+    this.ceremonyEngine = config.ceremonies?.length
+      ? new CeremonyTriggerEngine(
+          config.ceremonies,
+          (agentName, message) => this.dispatch(agentName, message),
+          () => Array.from(this.sessions.keys()),
+        )
+      : null;
   }
 
   /**
@@ -234,6 +261,11 @@ export class AgentSessionManager {
     const charter = await this.compileCharter(resolved);
     const systemPrompt = await this.buildSystemPrompt(resolved, charter);
 
+    // Note: MCP tools are provided via the MCP Bridge (tools/mcp-bridge.ts) which
+    // spawns MCP servers at squad server startup and registers their tools as squad tools.
+    // The native SessionConfig.mcpServers path is not used because the copilot CLI
+    // doesn't expose MCP server tools to programmatic SDK sessions.
+
     const sessionConfig: SquadSessionConfig = {
       model: charter.modelPreference ?? this.defaultModel,
       tools: this.tools,
@@ -243,7 +275,6 @@ export class AgentSessionManager {
       },
       workingDirectory: this.workingDirectory ?? this.squadRoot,
       onPermissionRequest: () => ({ kind: 'approved' as const }),
-      mcpServers: this.mcpServers,
     };
 
     const session = await this.client.createSession(sessionConfig);
@@ -305,6 +336,8 @@ export class AgentSessionManager {
 
     await session.sendMessage({ prompt });
 
+    this.ceremonyEngine?.onActivity();
+
     // Capture outbound message and update timestamp
     const entry = this.sessions.get(resolvedName);
     if (entry) {
@@ -338,8 +371,7 @@ export class AgentSessionManager {
 
   /**
    * Compile a charter for the given agent.
-   * Reads charter.md from .squad/agents/{name}/charter.md.
-   * Falls back to a minimal default if the file doesn't exist.
+   * Priority: workspace .squad/agents/{name}/charter.md > SDK built-in actor > generic fallback.
    */
   async compileCharter(agentName: string): Promise<AgentCharter> {
     const charterPath = path.join(this.squadRoot, '.squad', 'agents', agentName, 'charter.md');
@@ -347,7 +379,18 @@ export class AgentSessionManager {
     try {
       return await this.charterCompiler.compile(charterPath);
     } catch {
-      // Charter file missing or malformed — use a sensible default
+      const builtIn = getBuiltInActor(agentName);
+      if (builtIn) {
+        return {
+          name: builtIn.name,
+          displayName: builtIn.displayName,
+          role: builtIn.role,
+          expertise: builtIn.expertise,
+          style: builtIn.style,
+          prompt: builtIn.charter,
+        };
+      }
+
       return {
         name: agentName,
         displayName: agentName,
@@ -427,6 +470,47 @@ export class AgentSessionManager {
   }
 
   /**
+   * Merge global MCP servers with charter-declared MCP servers.
+   * 
+   * Charter's ## MCP Servers section can:
+   * 1. Reference servers by name → pulls config from global mcpServers (loaded from ~/.copilot/mcp-config.json)
+   * 2. Apply tool filters → overrides the tools list for that server
+   * 
+   * If a charter declares no MCP servers, all global servers are passed through (current behavior).
+   * If a charter declares specific servers, only those servers are included (whitelist mode).
+   */
+  private mergeMcpServers(charter: AgentCharter): Record<string, SquadMCPServerConfig> | undefined {
+    const charterMcp = charter.mcpServers;
+    
+    // No charter MCP declarations → pass through all global servers (backward compatible)
+    if (!charterMcp || Object.keys(charterMcp).length === 0) {
+      return this.mcpServers;
+    }
+
+    // No global servers to reference → nothing to merge
+    if (!this.mcpServers) {
+      return undefined;
+    }
+
+    // Charter declares specific servers → whitelist mode
+    const merged: Record<string, SquadMCPServerConfig> = {};
+
+    for (const [name, decl] of Object.entries(charterMcp)) {
+      const globalServer = this.mcpServers[name];
+      if (!globalServer) continue; // Charter references a server we don't have — skip
+
+      // Clone the global config and apply charter's tool filter if specified
+      const serverConfig = { ...globalServer };
+      if (decl.tools && decl.tools.length > 0) {
+        serverConfig.tools = decl.tools;
+      }
+      merged[name] = serverConfig;
+    }
+
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  /**
    * Gracefully close a specific agent's session.
    */
   async closeSession(agentName: string): Promise<void> {
@@ -438,6 +522,9 @@ export class AgentSessionManager {
     } catch {
       // Session may already be closed — that's fine
     }
+
+    // Remove from session pool to free capacity
+    this.client.pool.remove(entry.session.sessionId);
 
     this.sessions.delete(agentName);
 
@@ -455,12 +542,15 @@ export class AgentSessionManager {
       },
       timestamp: new Date(),
     });
+
+    this.ceremonyEngine?.onSessionClosed(agentName);
   }
 
   /**
    * Close all active agent sessions.
    */
   async closeAll(): Promise<void> {
+    this.ceremonyEngine?.disable();
     const agents = Array.from(this.sessions.keys());
     await Promise.allSettled(agents.map(name => this.closeSession(name)));
   }
@@ -532,6 +622,41 @@ export class AgentSessionManager {
    */
   get activeCount(): number {
     return this.sessions.size;
+  }
+
+  /**
+   * Wait until no session has had activity for `idleMs` milliseconds.
+   * Resolves with a summary of what happened. Rejects on timeout.
+   */
+  waitForIdle(idleMs: number, timeoutMs: number): Promise<{ agents: string[]; totalMessages: number; durationMs: number }> {
+    const startTime = Date.now();
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        if (Date.now() - startTime > timeoutMs) {
+          reject(new Error(`waitForIdle timed out after ${timeoutMs}ms`));
+          return;
+        }
+
+        const sessions = Array.from(this.sessions.values());
+        if (sessions.length === 0) {
+          resolve({ agents: [], totalMessages: 0, durationMs: Date.now() - startTime });
+          return;
+        }
+
+        const lastActivity = Math.max(...sessions.map(s => s.lastActiveAt.getTime()));
+        const elapsed = Date.now() - lastActivity;
+
+        if (elapsed >= idleMs) {
+          const agents = sessions.map(s => s.agentName);
+          const totalMessages = sessions.reduce((sum, s) => sum + s.messages.length, 0);
+          resolve({ agents, totalMessages, durationMs: Date.now() - startTime });
+          return;
+        }
+
+        setTimeout(check, Math.min(5000, idleMs - elapsed + 500));
+      };
+      setTimeout(check, idleMs);
+    });
   }
 
   /**

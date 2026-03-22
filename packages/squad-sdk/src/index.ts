@@ -14,6 +14,8 @@ export { resolveSquad, resolveGlobalSquadPath, ensureSquadPath, loadDirConfig, i
 export type { SquadDirConfig, ResolvedSquadPaths } from './resolution.js';
 export * from './config/index.js';
 export * from './agents/onboarding.js';
+export { BUILT_IN_ACTORS, isBuiltInActor, getBuiltInActor, getBuiltInActorNames } from './agents/built-in-actors.js';
+export type { BuiltInActor } from './agents/built-in-actors.js';
 export * from './casting/index.js';
 export * from './skills/index.js';
 export { selectResponseTier, getTier } from './coordinator/response-tiers.js';
@@ -83,3 +85,12 @@ export * from './server/index.js';
 
 // MCP (Model Context Protocol bridge)
 export * from './mcp/index.js';
+
+// Pipeline (Deterministic DAG execution)
+export * from './pipeline/index.js';
+
+// Intent Graph (Structured user intent)
+export * from './intent/index.js';
+
+// Pulse Protocol (Structured agent status)
+export * from './pulse/index.js';

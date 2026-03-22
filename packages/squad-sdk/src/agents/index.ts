@@ -25,6 +25,7 @@ export {
   type CharterConfigOverrides, 
   type ParsedCharter,
   type CompiledCharter,
+  type McpServerDeclaration,
 } from './charter-compiler.js';
 
 // --- M1-9 Model Selection + M3-5 Model Fallback ---
@@ -71,6 +72,14 @@ export {
   type OnboardResult,
 } from './onboarding.js';
 
+export {
+  BUILT_IN_ACTORS,
+  isBuiltInActor,
+  getBuiltInActor,
+  getBuiltInActorNames,
+  type BuiltInActor,
+} from './built-in-actors.js';
+
 // --- Charter Types ---
 
 export interface AgentCharter {
@@ -100,6 +109,9 @@ export interface AgentCharter {
 
   /** Model preference from charter */
   modelPreference?: string;
+
+  /** MCP servers declared in charter (## MCP Servers section) */
+  mcpServers?: Record<string, import('./charter-compiler.js').McpServerDeclaration>;
 }
 
 export type AgentLifecycleState = 'pending' | 'spawning' | 'active' | 'idle' | 'error' | 'destroyed';
@@ -139,6 +151,7 @@ export class CharterCompiler {
       style,
       prompt: content,
       modelPreference: parsed.modelPreference,
+      mcpServers: parsed.mcpServers,
     };
   }
 

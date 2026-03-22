@@ -10,6 +10,10 @@
 import { MCPServer } from './protocol.js';
 import { SquadServer, type SquadServerConfig } from '../server/index.js';
 import type { SquadConfig } from '../runtime/config.js';
+import { createPulse, formatPulseForUser, type PulsePhase, type PulseStatus } from '../pulse/index.js';
+import { createEmptyIntentGraph, serializeIntentGraph, type IntentGraph } from '../intent/index.js';
+import { PipelineRunner, type PipelineDefinition, type PipelineRunnerDeps } from '../pipeline/index.js';
+import { analyzeRun, formatAnalysisReport, type SessionSnapshot } from './analyze-run.js';
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -507,6 +511,567 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+
+  // --- Team Ben: Pulse Collector + Intent Graph state ---
+  const pulseCollector = server.getPulseCollector();
+  let activeIntentGraph: IntentGraph | null = null;
+  let pendingUserQuestions: string[] = [];
+  let waitResolvers: Array<(value: string) => void> = [];
+
+  pulseCollector.setOnUserRelevantPulse((pulse) => {
+    if (pulse.questionsForUser.length > 0) {
+      pendingUserQuestions.push(...pulse.questionsForUser);
+    }
+    const reason = pulse.questionsForUser.length > 0 ? 'question'
+      : pulse.phase === 'done' ? 'done'
+      : pulse.status === 'error' ? 'error'
+      : 'event';
+    for (const resolver of waitResolvers) {
+      resolver(reason);
+    }
+    waitResolvers = [];
+  });
+
+  // squad_run: Start a team run via Ben (user-facing entry point)
+  mcp.addTool(
+    {
+      name: 'squad_run',
+      description: 'Start a team run through Ben, your team representative. Ben will understand your request, ask clarifying questions if needed, and coordinate the team. This is the primary entry point for all work requests.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'What you want the team to do' },
+          context: { type: 'string', description: 'Optional additional context (e.g., relevant files, constraints)' },
+        },
+        required: ['message'],
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      activeIntentGraph = createEmptyIntentGraph(args.message);
+      pulseCollector.clear();
+      pendingUserQuestions = [];
+
+      const contextAddendum = args.context
+        ? `\n\nAdditional context from user:\n${args.context}`
+        : '';
+
+      const agentsDir = path.join(options.squadRoot, '.squad', 'agents');
+      let agents: { name: string; role: string }[] = [];
+      try {
+        const dirs = fs.readdirSync(agentsDir, { withFileTypes: true })
+          .filter((d: any) => d.isDirectory() && !d.name.startsWith('_'));
+        for (const d of dirs) {
+          const charterPath = path.join(agentsDir, d.name as string, 'charter.md');
+          try {
+            const content = fs.readFileSync(charterPath, 'utf-8');
+            const roleMatch = content.match(/\*\*Role:\*\*\s*(.+)/m)
+              || content.match(/Role:\s*(.+)/m)
+              || content.match(/^#\s+.+?\s*[-—]\s*(.+)/m);
+            agents.push({ name: d.name as string, role: roleMatch?.[1]?.trim() ?? '' });
+          } catch { agents.push({ name: d.name as string, role: '' }); }
+        }
+      } catch { /* no agents dir */ }
+
+      const findByRole = (pattern: RegExp) => agents.find(a => pattern.test(a.role))?.name ?? null;
+      const architectName = findByRole(/architect|lead|design|plan/i);
+      const implementerName = findByRole(/dev|engineer|implement|core|runtime/i) ?? agents[0]?.name;
+      if (!implementerName) {
+        return {
+          content: [{ type: 'text', text: 'No agents found in .squad/agents/. Create at least one agent with a charter before running.' }],
+        };
+      }
+
+      const reviewerName = findByRole(/review|quality|standards/i) ?? agents[1]?.name ?? implementerName;
+
+      const waitForResponse = async (agentName: string, timeoutMs: number): Promise<string | null> => {
+        const startCount = mgr.getMessages(agentName).filter((m: any) => m.role === 'assistant').length;
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const msgs = mgr.getMessages(agentName);
+          const replies = msgs.filter((m: any) => m.role === 'assistant');
+          if (replies.length > startCount) {
+            return replies[replies.length - 1]?.content ?? null;
+          }
+          await new Promise(r => setTimeout(r, 3000));
+        }
+        return null;
+      };
+
+      const pipelineDeps: PipelineRunnerDeps = {
+        dispatch: async (agentName: string, task: string, context?: string) => {
+          const result = await server.dispatch(agentName, task, context);
+          return { sessionId: result.sessionId, status: result.status, agentName: result.agentName };
+        },
+        waitForResponse,
+        onPhaseStart: (phaseId: string, agent: string) => {
+          pulseCollector.record(createPulse({
+            agent, phase: 'starting', status: 'ok', progressPct: 0,
+            summary: `Phase ${phaseId} starting`, blockers: [], questionsForUser: [],
+            artifacts: [], nextStep: phaseId,
+          }));
+        },
+        onPhaseComplete: (result) => {
+          pulseCollector.record(createPulse({
+            agent: result.agent,
+            phase: result.status === 'completed' ? 'done' : 'blocked',
+            status: result.status === 'completed' ? 'ok' : 'error',
+            progressPct: result.status === 'completed' ? 100 : 0,
+            summary: result.error ?? `Phase ${result.phaseId} completed`,
+            blockers: result.error ? [result.error] : [],
+            questionsForUser: [], artifacts: [], nextStep: '',
+          }));
+        },
+        onPipelineComplete: (state) => {
+          pulseCollector.record(createPulse({
+            agent: 'ben', phase: state.status === 'completed' ? 'done' : 'blocked',
+            status: state.status === 'completed' ? 'ok' : 'error',
+            progressPct: 100,
+            summary: state.status === 'completed'
+              ? 'Pipeline complete. All phases passed.'
+              : 'Pipeline failed. Check phase results.',
+            blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
+          }));
+        },
+      };
+
+      const phases: import('../pipeline/types.js').PhaseDefinition[] = [
+        {
+          id: 'understand',
+          agent: 'ben',
+          task: [
+            'A user has a new request. Understand it deeply.',
+            'If anything is unclear, use squad_pulse with questionsForUser.',
+            'Respond with a clear summary of what needs to be done.',
+            'Do NOT dispatch to any agents. Just understand and summarize.',
+            '',
+            `User request: ${args.message}${contextAddendum}`,
+          ].join('\n'),
+          gate: {
+            validate: (o: unknown) => typeof o === 'string' && (o as string).length > 20,
+            description: 'Ben must produce a substantive understanding',
+          },
+          timeout: 120_000,
+        },
+      ];
+
+      if (architectName) {
+        phases.push({
+          id: 'plan',
+          agent: architectName,
+          task: [
+            'Review this plan for feasibility and gaps before implementation starts.',
+            `Request: ${args.message}${contextAddendum}`,
+            '',
+            'Use squad_read_session to read Ben\'s understanding.',
+            'Check: Is the scope clear? Are there architectural concerns? Missing edge cases?',
+            'Respond with approval or specific gaps that need addressing.',
+          ].join('\n'),
+          dependsOn: ['understand'],
+          gate: {
+            validate: (o: unknown) => typeof o === 'string' && (o as string).length > 20,
+            description: 'Architect must produce feasibility assessment',
+          },
+          timeout: 180_000,
+        });
+      }
+
+      phases.push({
+        id: 'implement',
+        agent: implementerName,
+        task: [
+          `Implement the following request:`,
+          `${args.message}${contextAddendum}`,
+          '',
+          'Write code, add tests, and verify the build passes.',
+          'Use squad_pulse to report progress at milestones.',
+          'When done, emit squad_pulse with phase "done" listing the files you created or modified.',
+        ].join('\n'),
+        dependsOn: architectName ? ['plan'] : ['understand'],
+        gate: {
+          validate: (o: unknown) => typeof o === 'string' && (o as string).length > 50,
+          description: 'Implementer must produce substantial output describing what was built',
+        },
+        timeout: 300_000,
+      });
+
+      phases.push({
+        id: 'review',
+        agent: reviewerName,
+        task: [
+          `Review the implementation for the following request:`,
+          `${args.message}`,
+          '',
+          `Use squad_read_session to read ${implementerName}'s session and see what was built.`,
+          'Check: code quality, test coverage, pattern consistency, type safety.',
+          'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
+        ].join('\n'),
+        dependsOn: ['implement'],
+        gate: {
+          validate: (o: unknown) => typeof o === 'string' && (o as string).length > 20,
+          description: 'Reviewer must produce a substantive review',
+        },
+        timeout: 300_000,
+      });
+
+      const pipelineDefinition: PipelineDefinition = {
+        id: `run-${Date.now()}`,
+        name: 'Team Ben Run',
+        phases,
+      };
+
+      const pipeline = new PipelineRunner(pipelineDefinition, pipelineDeps);
+      pipeline.run().catch((err) => {
+        pulseCollector.record(createPulse({
+          agent: 'ben', phase: 'blocked', status: 'error', progressPct: 0,
+          summary: `Pipeline error: ${err instanceof Error ? err.message : String(err)}`,
+          blockers: [String(err)], questionsForUser: [], artifacts: [], nextStep: '',
+        }));
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `Pipeline started: ${phases.map(p => `${p.id}(${p.agent})`).join(' → ')}`,
+            `Intent: ${args.message}`,
+            'Use squad_wait to monitor progress.',
+          ].join('\n'),
+        }],
+      };
+    },
+  );
+
+  // squad_ask: Send a follow-up message to Ben mid-run
+  mcp.addTool(
+    {
+      name: 'squad_ask',
+      description: 'Send a follow-up message or answer to Ben during an active run. Use this to answer questions Ben asked, provide additional context, or change direction.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'Your message to Ben' },
+        },
+        required: ['message'],
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      try {
+        const response = await mgr.sendFollowUp('ben', args.message);
+
+        for (const resolver of waitResolvers) {
+          resolver('user_response');
+        }
+        waitResolvers = [];
+        pendingUserQuestions = [];
+
+        return {
+          content: [{
+            type: 'text',
+            text: response ?? 'Message sent to Ben.',
+          }],
+        };
+      } catch {
+        return {
+          content: [{
+            type: 'text',
+            text: 'Ben does not have an active session. Use squad_run to start a new run.',
+          }],
+        };
+      }
+    },
+  );
+
+  // squad_respond: Answer a specific question from the team
+  mcp.addTool(
+    {
+      name: 'squad_respond',
+      description: 'Answer a pending question from the team. Use this when squad_wait returns questions that need your input.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          answer: { type: 'string', description: 'Your answer to the team\'s question' },
+        },
+        required: ['answer'],
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      const questionContext = pendingUserQuestions.length > 0
+        ? `User answered the following questions: ${pendingUserQuestions.join('; ')}\n\nAnswer: ${args.answer}`
+        : `User response: ${args.answer}`;
+
+      try {
+        const response = await mgr.sendFollowUp('ben', questionContext);
+
+        for (const resolver of waitResolvers) {
+          resolver('user_response');
+        }
+        waitResolvers = [];
+        pendingUserQuestions = [];
+
+        return {
+          content: [{
+            type: 'text',
+            text: response ?? 'Response delivered to Ben.',
+          }],
+        };
+      } catch {
+        return {
+          content: [{
+            type: 'text',
+            text: 'No active session. Use squad_run to start a new run.',
+          }],
+        };
+      }
+    },
+  );
+
+  // squad_pulse: Agents emit structured status updates (internal tool)
+  mcp.addTool(
+    {
+      name: 'squad_pulse',
+      description: 'Emit a structured status update (Pulse). Use this at milestones to report progress, ask questions, or signal completion. The coordinator will route user-relevant pulses to Ben automatically.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agent: { type: 'string', description: 'Your agent name' },
+          phase: { type: 'string', enum: ['starting', 'analyzing', 'implementing', 'testing', 'reviewing', 'done', 'blocked'], description: 'Current phase' },
+          status: { type: 'string', enum: ['ok', 'warning', 'error'], description: 'Status level' },
+          progressPct: { type: 'number', description: 'Progress percentage (0-100)' },
+          summary: { type: 'string', description: 'Brief summary of what happened' },
+          blockers: { type: 'array', items: { type: 'string' }, description: 'List of blockers (empty if none)' },
+          questionsForUser: { type: 'array', items: { type: 'string' }, description: 'Questions that need user input (empty if none)' },
+          artifacts: { type: 'array', items: { type: 'string' }, description: 'Files or outputs produced (empty if none)' },
+          nextStep: { type: 'string', description: 'What you will do next' },
+        },
+        required: ['agent', 'phase', 'status', 'progressPct', 'summary'],
+      },
+    },
+    async (args) => {
+      const pulse = createPulse({
+        agent: args.agent,
+        phase: args.phase as PulsePhase,
+        status: (args.status ?? 'ok') as PulseStatus,
+        progressPct: args.progressPct ?? 0,
+        summary: args.summary,
+        blockers: args.blockers ?? [],
+        questionsForUser: args.questionsForUser ?? [],
+        artifacts: args.artifacts ?? [],
+        nextStep: args.nextStep ?? '',
+      });
+
+      const filter = pulseCollector.record(pulse);
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Pulse recorded: [${pulse.agent}] ${pulse.phase} ${pulse.progressPct}% — ${filter.userRelevant ? '(user-relevant: ' + filter.reason + ')' : '(internal)'}`,
+        }],
+      };
+    },
+  );
+
+  // squad_wait: Block until something needs user attention
+  mcp.addTool(
+    {
+      name: 'squad_wait',
+      description: 'Wait for a team event that needs your attention — a question from an agent, a milestone, an error, or run completion. Blocks until something happens or timeout. Use this instead of polling squad_status.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          timeoutMs: { type: 'number', description: 'Maximum wait time in ms (default: 120000 = 2 min)' },
+        },
+      },
+    },
+    async (args) => {
+      const timeoutMs = args.timeoutMs ?? 120_000;
+
+      const queued = pulseCollector.drainUserQueue();
+      if (queued.length > 0) {
+        return {
+          content: [{
+            type: 'text',
+            text: queued.map(p => formatPulseForUser(p)).join('\n\n---\n\n'),
+          }],
+        };
+      }
+
+      let myResolver: ((value: string) => void) | undefined;
+      const reason = await Promise.race([
+        new Promise<string>(resolve => {
+          myResolver = resolve;
+          waitResolvers.push(resolve);
+        }),
+        new Promise<string>(resolve => {
+          setTimeout(() => resolve('timeout'), timeoutMs);
+        }),
+      ]);
+
+      if (myResolver) {
+        waitResolvers = waitResolvers.filter(r => r !== myResolver);
+      }
+
+      if (reason === 'timeout') {
+        const latest = pulseCollector.getLatestByAgent();
+        const summaryLines = [...latest.entries()].map(
+          ([agent, p]) => `${agent}: ${p.phase} ${p.progressPct}% — ${p.summary}`,
+        );
+        return {
+          content: [{
+            type: 'text',
+            text: summaryLines.length > 0
+              ? `No user-relevant events in ${timeoutMs / 1000}s. Current status:\n${summaryLines.join('\n')}`
+              : `No events in ${timeoutMs / 1000}s. Team may still be working. Use squad_status for details.`,
+          }],
+        };
+      }
+
+      const newPulses = pulseCollector.drainUserQueue();
+      if (newPulses.length > 0) {
+        return {
+          content: [{
+            type: 'text',
+            text: newPulses.map(p => formatPulseForUser(p)).join('\n\n---\n\n'),
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: pendingUserQuestions.length > 0
+            ? `Team has questions:\n${pendingUserQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\nUse squad_respond to answer.`
+            : `Event received (${reason}). Use squad_status for details.`,
+        }],
+      };
+    },
+  );
+
+  // squad_wait_for_idle: Block until all agent sessions are idle
+  mcp.addTool(
+    {
+      name: 'squad_wait_for_idle',
+      description: 'Block until all agent sessions have been idle (no new messages) for the specified duration. Use this to wait for a pipeline run to complete before grading or processing results. Returns a summary of agents and messages when idle.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          idleMs: { type: 'number', description: 'Idle threshold in ms — resolve after this much inactivity (default: 30000)' },
+          timeoutMs: { type: 'number', description: 'Maximum wait time in ms before timing out (default: 1800000 = 30 min)' },
+        },
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      const idleMs = args.idleMs ?? 30_000;
+      const timeoutMs = args.timeoutMs ?? 1_800_000;
+
+      try {
+        const result = await mgr.waitForIdle(idleMs, timeoutMs);
+        return {
+          content: [{
+            type: 'text',
+            text: [
+              `Pipeline idle after ${Math.round(result.durationMs / 1000)}s.`,
+              `Active agents: ${result.agents.length > 0 ? result.agents.join(', ') : '(none)'}`,
+              `Total messages: ${result.totalMessages}`,
+            ].join('\n'),
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{
+            type: 'text',
+            text: `Wait failed: ${err instanceof Error ? err.message : String(err)}`,
+          }],
+        };
+      }
+    },
+  );
+
+  // squad_analyze_run: Sage's post-run analysis tool
+  mcp.addTool(
+    {
+      name: 'squad_analyze_run',
+      description: 'Analyze a completed Squad run. Reads pulse history and agent session messages, then produces a structured report with concrete improvement proposals for charters, routing rules, and SDK config. Intended for post-run retrospectives (Sage).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentFilter: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional list of agent names to include. If omitted, all agents are analyzed.',
+          },
+        },
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      // Gather pulse history
+      const collector = server.getPulseCollector();
+      let pulses = [...collector.getAll()];
+
+      // Gather session snapshots
+      const activeSessions = mgr.listActiveSessions();
+      let sessionSnapshots: SessionSnapshot[] = activeSessions.map(info => {
+        const messages = mgr.getMessages(info.agentName);
+        return {
+          agentName: info.agentName,
+          messageCount: messages.length,
+          messages: messages.map(m => ({
+            role: m.role,
+            content: m.content.length > 2000 ? m.content.slice(0, 2000) + '…(truncated)' : m.content,
+            timestamp: m.timestamp,
+          })),
+        };
+      });
+
+      // Apply agent filter if provided
+      if (args.agentFilter && Array.isArray(args.agentFilter) && args.agentFilter.length > 0) {
+        const filterSet = new Set(args.agentFilter as string[]);
+        pulses = pulses.filter(p => filterSet.has(p.agent));
+        sessionSnapshots = sessionSnapshots.filter(s => filterSet.has(s.agentName));
+      }
+
+      if (pulses.length === 0 && sessionSnapshots.length === 0) {
+        return {
+          content: [{
+            type: 'text',
+            text: 'No run data found. Either no agents have been dispatched, or pulse/session data has been cleared.',
+          }],
+        };
+      }
+
+      const report = analyzeRun({
+        pulses,
+        sessions: sessionSnapshots,
+        squadRoot: options.squadRoot,
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: formatAnalysisReport(report),
+        }],
+      };
+    },
+  );
 
   // --- Start dashboard HTTP server ---
   const dashPort = parseInt(process.env['SQUAD_DASHBOARD_PORT'] ?? '3850', 10);

@@ -14,6 +14,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { SquadTool, SquadToolResult } from '../adapter/types.js';
+import { createPulse, filterPulseForUser, type PulseFilter } from '../pulse/index.js';
 import { trace, SpanStatusCode } from '../runtime/otel-api.js';
 
 const tracer = trace.getTracer('squad-sdk');
@@ -98,6 +99,18 @@ export interface SkillRequest {
   confidence?: 'low' | 'medium' | 'high';
 }
 
+export interface PulseRequest {
+  agent: string;
+  phase: 'starting' | 'analyzing' | 'implementing' | 'testing' | 'reviewing' | 'done' | 'blocked';
+  status: 'ok' | 'warning' | 'error';
+  progressPct: number;
+  summary: string;
+  blockers?: string[];
+  questionsForUser?: string[];
+  artifacts?: string[];
+  nextStep?: string;
+}
+
 // --- Tool Definition Helper ---
 
 /**
@@ -165,6 +178,7 @@ export class ToolRegistry {
   private dispatchGetter?: () => ((agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string }>) | undefined;
   private sendFollowUpGetter?: () => ((agentName: string, message: string) => Promise<string | null>) | undefined;
   private getMessagesGetter?: () => ((agentName: string) => { role: string; content: string; timestamp: string }[]) | undefined;
+  private pulseRecordGetter?: () => ((pulse: PulseRequest) => PulseFilter) | undefined;
 
   constructor(
     squadRoot = '.squad',
@@ -172,12 +186,14 @@ export class ToolRegistry {
     dispatchGetter?: () => ((agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string }>) | undefined,
     sendFollowUpGetter?: () => ((agentName: string, message: string) => Promise<string | null>) | undefined,
     getMessagesGetter?: () => ((agentName: string) => { role: string; content: string; timestamp: string }[]) | undefined,
+    pulseRecordGetter?: () => ((pulse: PulseRequest) => PulseFilter) | undefined,
   ) {
     this.squadRoot = squadRoot;
     this.sessionPoolGetter = sessionPoolGetter;
     this.dispatchGetter = dispatchGetter;
     this.sendFollowUpGetter = sendFollowUpGetter;
     this.getMessagesGetter = getMessagesGetter;
+    this.pulseRecordGetter = pulseRecordGetter;
     this.registerSquadTools();
   }
 
@@ -708,6 +724,41 @@ export class ToolRegistry {
     this.tools.set('squad_memory', squadMemory);
     this.tools.set('squad_status', squadStatus);
     this.tools.set('squad_skill', squadSkill);
+
+    const squadPulse = defineTool<PulseRequest>({
+      name: 'squad_pulse',
+      description: 'Emit a structured status update (Pulse) at milestones. Report progress, ask questions, or signal completion. User-relevant pulses (questions, errors, blockers, done) are automatically surfaced to the user via Ben.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agent: { type: 'string', description: 'Your agent name' },
+          phase: { type: 'string', enum: ['starting', 'analyzing', 'implementing', 'testing', 'reviewing', 'done', 'blocked'], description: 'Current phase' },
+          status: { type: 'string', enum: ['ok', 'warning', 'error'], description: 'Status level' },
+          progressPct: { type: 'number', description: 'Progress percentage (0-100)' },
+          summary: { type: 'string', description: 'Brief summary of what happened' },
+          blockers: { type: 'array', items: { type: 'string' }, description: 'List of blockers' },
+          questionsForUser: { type: 'array', items: { type: 'string' }, description: 'Questions that need user input' },
+          artifacts: { type: 'array', items: { type: 'string' }, description: 'Files or outputs produced' },
+          nextStep: { type: 'string', description: 'What you will do next' },
+        },
+        required: ['agent', 'phase', 'status', 'progressPct', 'summary'],
+      },
+      handler: async (args) => {
+        const recordFn = this.pulseRecordGetter?.();
+        if (!recordFn) {
+          return {
+            textResultForLlm: 'Pulse recorded (no collector active)',
+            resultType: 'success' as const,
+          };
+        }
+        const filter = recordFn(args);
+        return {
+          textResultForLlm: `Pulse recorded: [${args.agent}] ${args.phase} ${args.progressPct}% — ${filter.userRelevant ? '(user-relevant: ' + filter.reason + ')' : '(internal)'}`,
+          resultType: 'success' as const,
+        };
+      },
+    });
+    this.tools.set('squad_pulse', squadPulse);
   }
 
   /** Get all registered tools for session config */
@@ -726,5 +777,10 @@ export class ToolRegistry {
   /** Get a specific tool by name */
   getTool(name: string): SquadTool<any> | undefined {
     return this.tools.get(name);
+  }
+
+  /** Register an external tool (e.g., from MCP bridge) */
+  registerTool(tool: SquadTool<any>): void {
+    this.tools.set(tool.name, tool);
   }
 }

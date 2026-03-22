@@ -4,6 +4,9 @@
 
 | Work Type | Agent | Examples |
 |-----------|-------|---------|
+| User communication | Ben 🗣️ | Intent clarification, progress updates, question relay, user-facing responses |
+| Architecture review | Strausz 🏗️ | Plan verification, gap analysis, API design, feasibility assessment |
+| Code review | Hockney 🔍 | Standards enforcement, type safety, test coverage, quality gates |
 | Core runtime | EECOM 🔧 | CopilotClient, adapter, session pool, tools module, spawn orchestration |
 | Prompt architecture | Procedures 🧠 | Agent charters, spawn templates, coordinator logic, response tier selection |
 | Type system | CONTROL 👩‍💻 | Discriminated unions, generics, tsconfig, strict mode enforcement, declaration files |
@@ -43,6 +46,9 @@
 | `src/sharing/` | EECOM 🔧 | Network 📦 |
 | `src/skills/` | Procedures 🧠 | — |
 | `src/tools/` | EECOM 🔧 | CAPCOM 🕵️ |
+| `src/pipeline/` | Fenster 🔧 | EECOM 🔧 |
+| `src/intent/` | Fenster 🔧 | Procedures 🧠 |
+| `src/pulse/` | Fenster 🔧 | EECOM 🔧 |
 | `src/cli/shell/` | VOX 🖥️ | DSKY 🖥️ |
 | `src/cli/shell/components/` | DSKY 🖥️ | VOX 🖥️ |
 | `tests/acceptance/` | Sims 🧪 | FIDO 🧪 |

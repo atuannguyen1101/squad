@@ -13,15 +13,18 @@
 
 import { SquadClientWithPool, type SquadClientWithPoolConfig } from '../client/index.js';
 import { SquadCoordinator, type SquadCoordinatorOptions } from '../coordinator/index.js';
+import { McpBridge } from '../tools/mcp-bridge.js';
 import { ToolRegistry } from '../tools/index.js';
 import { EventBus } from '../runtime/event-bus.js';
 import { RemoteBridge } from '../remote/bridge.js';
 import type { RemoteBridgeConfig } from '../remote/types.js';
 import type { SquadConfig } from '../runtime/config.js';
+import type { CeremonyConfig } from '../config/schema.js';
 import type { SquadSession } from '../adapter/types.js';
 import { AgentSessionManager, type AgentSessionManagerConfig, type DispatchResult, type ActiveSessionInfo } from './agent-lifecycle.js';
 import { ServerPersistence, type PersistenceConfig, type ServerStateSnapshot } from './persistence.js';
 import { EventHistory, type HistoryEvent } from './event-history.js';
+import { PulseCollector, createPulse as createPulseFn, filterPulseForUser as filterPulseFn } from '../pulse/index.js';
 
 // ============================================================================
 // Types
@@ -69,12 +72,14 @@ export class SquadServer {
   private readonly eventHistory: EventHistory;
   private readonly toolRegistry: ToolRegistry;
   private readonly persistence: ServerPersistence;
+  private readonly pulseCollector: PulseCollector;
   private readonly serverStartedAt: string;
 
   private client: SquadClientWithPool | null = null;
   private coordinator: SquadCoordinator | null = null;
   private sessionManager: AgentSessionManager | null = null;
   private remoteBridge: RemoteBridge | null = null;
+  private mcpBridge: McpBridge | null = null;
   private running = false;
 
   constructor(config: SquadServerConfig) {
@@ -107,6 +112,8 @@ export class SquadServer {
 
     // Initialize ToolRegistry with lazy getters so it can reference
     // components that aren't created until start().
+    this.pulseCollector = new PulseCollector();
+
     this.toolRegistry = new ToolRegistry(
       // squadRoot for file-based tools (decisions, history, skills)
       squadRoot,
@@ -137,6 +144,24 @@ export class SquadServer {
           return mgr.getMessages(agentName);
         };
       },
+      // pulseRecordGetter — records a pulse in the shared collector
+      () => {
+        const collector = this.pulseCollector;
+        return (pulse: { agent: string; phase: string; status: string; progressPct: number; summary: string; blockers?: string[]; questionsForUser?: string[]; artifacts?: string[]; nextStep?: string }) => {
+          const p = createPulseFn({
+            agent: pulse.agent,
+            phase: pulse.phase as any,
+            status: (pulse.status ?? 'ok') as any,
+            progressPct: pulse.progressPct ?? 0,
+            summary: pulse.summary,
+            blockers: pulse.blockers ?? [],
+            questionsForUser: pulse.questionsForUser ?? [],
+            artifacts: pulse.artifacts ?? [],
+            nextStep: pulse.nextStep ?? '',
+          });
+          return collector.record(p);
+        };
+      },
     );
   }
 
@@ -160,6 +185,21 @@ export class SquadServer {
     this.client = new SquadClientWithPool(this.config.clientConfig ?? {});
     await this.client.connect();
 
+    // 1b. Initialize MCP Bridge — spawn external MCP servers and discover tools
+    this.mcpBridge = new McpBridge({ skipServers: ['squad'] });
+    try {
+      const bridgedTools = await this.mcpBridge.initialize();
+      for (const tool of bridgedTools) {
+        this.toolRegistry.registerTool(tool);
+      }
+      const bridgeStatus = this.mcpBridge.getStatus();
+      if (bridgeStatus.length > 0) {
+        process.stderr.write(`[mcp-bridge] Bridged ${bridgeStatus.map(s => `${s.name}(${s.toolCount})`).join(', ')} tools\n`);
+      }
+    } catch (err) {
+      process.stderr.write(`[mcp-bridge] Failed to initialize: ${err instanceof Error ? err.message : err}\n`);
+    }
+
     // 2. Create the agent session manager
     this.sessionManager = new AgentSessionManager({
       client: this.client,
@@ -168,6 +208,7 @@ export class SquadServer {
       tools: this.toolRegistry.getTools(),
       defaultModel: this.config.defaultModel ?? this.config.squadConfig.models?.defaultModel,
       workingDirectory: this.config.workingDirectory ?? squadRoot,
+      ceremonies: this.config.squadConfig.ceremonies as CeremonyConfig[] | undefined,
     });
 
     // Wire persistence into session manager and load any saved state
@@ -259,6 +300,12 @@ export class SquadServer {
     if (this.remoteBridge) {
       await this.remoteBridge.stop();
       this.remoteBridge = null;
+    }
+
+    // 2b. Shut down MCP bridge
+    if (this.mcpBridge) {
+      await this.mcpBridge.shutdown();
+      this.mcpBridge = null;
     }
 
     // 3. Disconnect client
@@ -381,6 +428,10 @@ export class SquadServer {
    */
   getSessionManager(): AgentSessionManager | null {
     return this.sessionManager;
+  }
+
+  getPulseCollector(): PulseCollector {
+    return this.pulseCollector;
   }
 
   /**

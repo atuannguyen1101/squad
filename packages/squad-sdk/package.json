@@ -1,6 +1,6 @@
 {
   "name": "@bradygaster/squad-sdk",
-  "version": "0.8.25-build.1",
+  "version": "0.8.25-build.8",
   "description": "Squad SDK — Programmable multi-agent runtime for GitHub Copilot",
   "type": "module",
   "main": "./dist/index.js",
@@ -161,6 +161,18 @@
     "./mcp": {
       "types": "./dist/mcp/index.d.ts",
       "import": "./dist/mcp/index.js"
+    },
+    "./pipeline": {
+      "types": "./dist/pipeline/index.d.ts",
+      "import": "./dist/pipeline/index.js"
+    },
+    "./intent": {
+      "types": "./dist/intent/index.d.ts",
+      "import": "./dist/intent/index.js"
+    },
+    "./pulse": {
+      "types": "./dist/pulse/index.d.ts",
+      "import": "./dist/pulse/index.js"
     }
   },
   "files": [
@@ -178,6 +190,7 @@
   },
   "dependencies": {
     "@github/copilot-sdk": "^0.1.32",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "vscode-jsonrpc": "^8.2.1"
   },
   "optionalDependencies": {
