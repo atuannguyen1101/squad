@@ -130,7 +130,8 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 | Run Analysis | `src/mcp/analyze-run.ts` | Reads pulses + sessions, produces report |
 | SquadTool pulse | `src/tools/index.ts` | squad_pulse registered for agent sessions |
 | Cancellation | `src/pipeline/runner.ts` | PipelineRunner.cancel() + squad_cancel MCP tool |
-| Unit Tests | `test/pipeline.test.ts`, `test/pulse.test.ts`, `test/intent-graph.test.ts`, `test/built-in-actors.test.ts` | 46/46 passing |
+| MCP Wiring Tests | `test/mcp-wiring.test.ts` | Q&A loop, cancel, concurrent guard, pulse-to-wait (10 tests) |
+| Unit Tests | `test/pipeline.test.ts`, `test/pulse.test.ts`, `test/intent-graph.test.ts`, `test/built-in-actors.test.ts` | 89/89 passing (across 7 test files) |
 
 ## What's Incomplete
 
@@ -140,9 +141,9 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 | Intent Graph not updated mid-run | Ben creates it once, never maintains it |
 | Context windowing | Old messages accumulate unbounded in agent sessions |
 | Shared scratchpad | No cross-agent artifact sharing mechanism |
-| Concurrent `squad_run` race | Module-scoped singletons overwritten by second run |
+| ~~Concurrent `squad_run` race~~ | **FIXED** -- activeRunId guard rejects concurrent calls; cleared on completion or cancel |
 | ~~`squad_cancel`~~ | **BUILT** — cancels all active pipelines, closes sessions, resolves waiters |
-| MCP wiring tests | The most complex code has zero test coverage |
+| ~~MCP wiring tests~~ | **BUILT** -- 10 integration tests covering Q&A loop, cancel, concurrent guard, pulse-to-wait |
 | Sage end-to-end test | `squad_analyze_run` exists but not tested with Sage as dispatched agent |
 | Dashboard port stability | Port changes on restart if old process didn't fully exit |
 

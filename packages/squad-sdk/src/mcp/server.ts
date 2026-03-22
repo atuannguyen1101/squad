@@ -518,6 +518,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   let pendingUserQuestions: string[] = [];
   let waitResolvers: Array<(value: string) => void> = [];
   let activePipelines: PipelineRunner[] = [];
+  let activeRunId: string | null = null;
 
   pulseCollector.setOnUserRelevantPulse((pulse) => {
     const questions = pulse.questionsForUser ?? [];
@@ -549,10 +550,21 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       },
     },
     async (args) => {
+      if (activeRunId) {
+        return {
+          content: [{
+            type: 'text',
+            text: `A run is already active (${activeRunId}). Use squad_cancel to stop it first, or squad_wait to monitor progress.`,
+          }],
+        };
+      }
+
       await ensureStarted();
       const mgr = server.getSessionManager();
       if (!mgr) throw new Error('Server not ready');
 
+      const runId = `run-${Date.now()}`;
+      activeRunId = runId;
       activeIntentGraph = createEmptyIntentGraph(args.message);
       pulseCollector.clear();
       pendingUserQuestions = [];
@@ -704,7 +716,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       ];
 
       const pipelineDefinition: PipelineDefinition = {
-        id: `run-${Date.now()}`,
+        id: runId,
         name: 'Team Ben Run',
         phases,
       };
@@ -774,6 +786,8 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           summary: `Pipeline error: ${err instanceof Error ? err.message : String(err)}`,
           blockers: [String(err)], questionsForUser: [], artifacts: [], nextStep: '',
         }));
+      }).finally(() => {
+        activeRunId = null;
       });
 
       return {
@@ -1088,6 +1102,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       }
 
       activePipelines = [];
+      activeRunId = null;
       pendingUserQuestions = [];
       for (const resolver of waitResolvers) {
         resolver('cancelled');
