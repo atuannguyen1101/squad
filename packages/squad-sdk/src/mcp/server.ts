@@ -11,7 +11,7 @@ import { MCPServer } from './protocol.js';
 import { SquadServer, type SquadServerConfig } from '../server/index.js';
 import type { SquadConfig } from '../runtime/config.js';
 import { createPulse, formatPulseForUser, type PulsePhase, type PulseStatus } from '../pulse/index.js';
-import { createEmptyIntentGraph, serializeIntentGraph, type IntentGraph } from '../intent/index.js';
+import { createEmptyIntentGraph, serializeIntentGraph, updateIntentGraph, parseUnderstandPhaseOutput, parseRoutePhaseOutput, type IntentGraph } from '../intent/index.js';
 import { PipelineRunner, type PipelineDefinition, type PipelineRunnerDeps } from '../pipeline/index.js';
 import { analyzeRun, formatAnalysisReport, type SessionSnapshot } from './analyze-run.js';
 import * as http from 'node:http';
@@ -658,6 +658,17 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             blockers: result.error ? [result.error] : [],
             questionsForUser: [], artifacts: [], nextStep: '',
           }));
+
+          // --- Intent Graph updates at key milestones ---
+          if (result.status === 'completed' && activeIntentGraph && typeof result.output === 'string') {
+            if (result.phaseId === 'understand') {
+              const updates = parseUnderstandPhaseOutput(result.output);
+              activeIntentGraph = updateIntentGraph(activeIntentGraph, updates);
+            } else if (result.phaseId === 'route') {
+              const updates = parseRoutePhaseOutput(result.output);
+              activeIntentGraph = updateIntentGraph(activeIntentGraph, updates);
+            }
+          }
         },
         onPipelineComplete: (state) => {
           pulseCollector.record(createPulse({
@@ -945,6 +956,35 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         content: [{
           type: 'text',
           text: `Pulse recorded: [${pulse.agent}] ${pulse.phase} ${pulse.progressPct}% — ${filter.userRelevant ? '(user-relevant: ' + filter.reason + ')' : '(internal)'}`,
+        }],
+      };
+    },
+  );
+
+  // squad_intent: Inspect the current intent graph
+  mcp.addTool(
+    {
+      name: 'squad_intent',
+      description: 'Return the current Intent Graph for the active run. Shows the parsed goal, constraints, acceptance criteria, task assignments, and status. Useful for inspecting how the team understood your request.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    async () => {
+      if (!activeIntentGraph) {
+        return {
+          content: [{
+            type: 'text',
+            text: 'No active intent graph. Use squad_run to start a run first.',
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: serializeIntentGraph(activeIntentGraph),
         }],
       };
     },
