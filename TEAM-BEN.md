@@ -84,7 +84,7 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 ### Inter-Agent Communication
 - `squad_route` (async fire-and-forget) and `squad_send` (sync, 2min timeout)
 - Agents inside CopilotSessions have these as SquadTools
-- Shared scratchpad for parallel agents (not yet built)
+- Shared scratchpad for parallel agents (`squad_scratchpad_write/read/list`)
 
 ### Deterministic Pipeline
 - `PipelineRunner`: code-enforced DAG with typed `PhaseGate` validators
@@ -96,7 +96,7 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 ### Context Management
 - Intent Graph: structured representation of user intent (`goal`, `constraints`, `acceptanceCriteria`, etc.)
 - Pulse Protocol: bounded structured updates instead of unbounded prose
-- Context windowing: auto-summarize old messages (not yet built)
+- Context windowing: auto-summarize old messages when threshold exceeded (bounded at ~40k tokens)
 - Built-in actor charters are compact and focused
 
 ### Self-Improvement / Learning
@@ -131,7 +131,13 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 | SquadTool pulse | `src/tools/index.ts` | squad_pulse registered for agent sessions |
 | Cancellation | `src/pipeline/runner.ts` | PipelineRunner.cancel() + squad_cancel MCP tool |
 | MCP Wiring Tests | `test/mcp-wiring.test.ts` | Q&A loop, cancel, concurrent guard, pulse-to-wait (10 tests) |
-| Unit Tests | `test/pipeline.test.ts`, `test/pulse.test.ts`, `test/intent-graph.test.ts`, `test/built-in-actors.test.ts` | 89/89 passing (across 7 test files) |
+| Context Windowing | `src/context/context-window.ts` | Auto-summarize old messages, wired into agent-lifecycle.ts dispatch (21 tests) |
+| Shared Scratchpad | `src/scratchpad/scratchpad.ts` | 3 SquadTools registered, cleared between runs (34 tests) |
+| Built-in Actor Tool Restrictions | `src/agents/built-in-actors.ts`, `src/server/agent-lifecycle.ts` | allowedTools on BuiltInActor, enforced in getOrCreateSession — Ben only gets communication tools (30 tests) |
+| Gate Validation Fix | `src/pipeline/runner.ts` | extractResponseContent helper, TOOL_CALL_PLACEHOLDER for tool-call-only responses, pulse-aware gates |
+| Pipeline Done-Pulse Wait | `src/mcp/server.ts` | implPipelineDeps waits for agent done pulse before evaluating gate, via PulseCollector.waitForDonePulse() |
+| Pipeline Completion Signal | `src/mcp/server.ts` | understand+route onPipelineComplete emits phase:'implementing' not phase:'done'. Real done pulse after impl+review finishes |
+| Unit Tests | `test/pipeline.test.ts`, `test/pulse.test.ts`, `test/intent-graph.test.ts`, `test/built-in-actors.test.ts`, `test/context-window.test.ts`, `test/scratchpad.test.ts`, `test/built-in-actor-tools.test.ts` | 167/167 passing (across 10 test files) |
 
 ## What's Incomplete
 
@@ -139,13 +145,49 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 |------|--------|
 | ~~Pipeline understand phase vs Q&A loop~~ | **FIXED** — waitForResponse now detects pending user questions and waits for Q&A resolution before accepting a response |
 | Intent Graph not updated mid-run | Ben creates it once, never maintains it |
-| Context windowing | Old messages accumulate unbounded in agent sessions |
-| Shared scratchpad | No cross-agent artifact sharing mechanism |
+| ~~Context windowing~~ | **BUILT** — Auto-summarize old messages, wired into agent-lifecycle.ts dispatch (21 tests) |
+| ~~Shared scratchpad~~ | **BUILT** — 3 SquadTools registered, cleared between runs (34 tests) |
 | ~~Concurrent `squad_run` race~~ | **FIXED** -- activeRunId guard rejects concurrent calls; cleared on completion or cancel |
 | ~~`squad_cancel`~~ | **BUILT** — cancels all active pipelines, closes sessions, resolves waiters |
 | ~~MCP wiring tests~~ | **BUILT** -- 10 integration tests covering Q&A loop, cancel, concurrent guard, pulse-to-wait |
-| Sage end-to-end test | `squad_analyze_run` exists but not tested with Sage as dispatched agent |
+| Sage end-to-end test | Analysis engine works (13 tests), but no end-to-end dispatch-to-Sage test |
 | Dashboard port stability | Port changes on restart if old process didn't fully exit |
+| Proposal application workflow for Sage | Sage produces proposals but no workflow to apply them |
+| Automatic post-run Sage trigger | Sage must be called explicitly via `squad_analyze_run` |
+
+## Session Log (2026-03-22, Session 3)
+
+### What was done this session
+
+1. **Built context windowing (Priority 1)**: Implemented `ContextWindow` in `src/context/context-window.ts` with auto-summarization of old messages when context exceeds threshold. Wired into `agent-lifecycle.ts` dispatch function. Added 21 tests covering threshold detection, summary generation, message preservation, and edge cases. Context now bounded at ~40k tokens per agent session.
+
+2. **Built shared scratchpad (Priority 2)**: Implemented cross-agent artifact sharing in `src/scratchpad/scratchpad.ts` with three SquadTools: `squad_scratchpad_write`, `squad_scratchpad_read`, `squad_scratchpad_list`. Scratchpad cleared between runs. Added 34 tests covering write/read/list/filter operations, producer tracking, and concurrent access patterns.
+
+3. **Built-in actor tool restrictions**: Extended `BuiltInActor` interface with `allowedTools` property. Ben now only gets communication tools (squad_route, squad_send, squad_pulse, etc.) — no file/git access. Enforced in `getOrCreateSession` during tool filtering. Added 30 tests covering tool restriction enforcement, charter fallback with restrictions, and security boundaries.
+
+4. **Gate validation fix**: Added `extractResponseContent` helper to handle tool-call-only responses (returns `TOOL_CALL_PLACEHOLDER` when no text content). Made understand phase gate pulse-aware (checks `hasPendingUserQuestions` from PulseCollector, not just message timestamps). Prevents premature gate passing when Ben emits tool calls only.
+
+5. **Pipeline done-pulse wait**: Modified `implPipelineDeps` in `src/mcp/server.ts` to wait for agent's done pulse before evaluating gate. Uses `PulseCollector.waitForDonePulse()` with 5-minute timeout. Prevents gate from passing on intermediate pulses (analyzing, implementing).
+
+6. **Pipeline completion signal fix**: Changed understand+route `onPipelineComplete` to emit `phase:'implementing'` instead of `phase:'done'`. Real done pulse now only emitted after impl+review pipeline finishes. Fixes UX: user sees "implementing..." → "done" instead of "done" → "implementing..." → "done".
+
+7. **Sage analysis engine tests**: Added 13 tests to `test/analyze-run.test.ts` covering proposal generation, scope validation, run efficiency analysis, and improvement recommendations. Analysis engine works correctly. End-to-end dispatch-to-Sage test still needed.
+
+8. **Type check clean**: `tsc --noEmit` passes with zero errors. All 167 tests pass across 10 test files.
+
+### What the next session should do
+
+**Priority 1: Sage end-to-end dispatch test**
+Build a test that calls `squad_analyze_run` and verifies Sage as a dispatched agent produces a complete analysis report. Current tests verify the analysis engine logic but not the full Sage charter + dispatch flow.
+
+**Priority 2: Proposal application workflow**
+Design and implement workflow for applying Sage's proposals. Options: auto-create GitHub issues, write proposal files to `.squad/proposals/`, or integrate with existing PR review flow.
+
+**Priority 3: Automatic post-run Sage trigger**
+Add optional auto-trigger to `squad_run` completion. Config option: `autoAnalyze: boolean` in `squad.config.ts`. When enabled, automatically call `squad_analyze_run` after pipeline completes.
+
+**Priority 4: Dashboard port stability**
+Fix port allocation to persist across restarts. Options: write port to `.squad/.mcp-port`, retry logic with exponential backoff, or explicit port configuration in `squad.config.ts`.
 
 ## Session Log (2026-03-22, Session 2)
 
