@@ -517,6 +517,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   let activeIntentGraph: IntentGraph | null = null;
   let pendingUserQuestions: string[] = [];
   let waitResolvers: Array<(value: string) => void> = [];
+  let activePipelines: PipelineRunner[] = [];
 
   pulseCollector.setOnUserRelevantPulse((pulse) => {
     const questions = pulse.questionsForUser ?? [];
@@ -555,6 +556,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       activeIntentGraph = createEmptyIntentGraph(args.message);
       pulseCollector.clear();
       pendingUserQuestions = [];
+      activePipelines = [];
 
       const contextAddendum = args.context
         ? `\n\nAdditional context from user:\n${args.context}`
@@ -592,12 +594,20 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       const rosterSummary = agentRoster.map(a => `- ${a.name}: ${a.role}`).join('\n');
 
       const waitForResponse = async (agentName: string, timeoutMs: number): Promise<string | null> => {
-        const startCount = mgr.getMessages(agentName).filter((m: any) => m.role === 'assistant').length;
+        let currentCount = mgr.getMessages(agentName).filter((m: any) => m.role === 'assistant').length;
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
           const msgs = mgr.getMessages(agentName);
           const replies = msgs.filter((m: any) => m.role === 'assistant');
-          if (replies.length > startCount) {
+          if (replies.length > currentCount) {
+            // If the agent asked questions via pulse, don't accept this reply yet.
+            // Wait for the user to respond (squad_respond clears pendingUserQuestions),
+            // then capture the agent's NEXT reply after Q&A resolution.
+            if (pendingUserQuestions.length > 0) {
+              currentCount = replies.length;
+              await new Promise(r => setTimeout(r, 3000));
+              continue;
+            }
             return replies[replies.length - 1]?.content ?? null;
           }
           await new Promise(r => setTimeout(r, 3000));
@@ -700,6 +710,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       };
 
       const pipeline = new PipelineRunner(pipelineDefinition, pipelineDeps);
+      activePipelines.push(pipeline);
 
       pipeline.run().then(async (state) => {
         const routeResult = state.phaseResults.get('route');
@@ -755,6 +766,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           { id: `impl-${Date.now()}`, name: 'Implementation', phases: implPhases },
           pipelineDeps,
         );
+        activePipelines.push(implPipeline);
         await implPipeline.run();
       }).catch((err) => {
         pulseCollector.record(createPulse({
@@ -1033,6 +1045,64 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           }],
         };
       }
+    },
+  );
+
+  // squad_cancel: Cancel an active pipeline run
+  mcp.addTool(
+    {
+      name: 'squad_cancel',
+      description: 'Cancel an active squad_run pipeline. Cancels all running phases, closes agent sessions, and returns a summary of what was completed before cancellation.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    async () => {
+      if (activePipelines.length === 0) {
+        return {
+          content: [{ type: 'text', text: 'No active pipeline to cancel.' }],
+        };
+      }
+
+      const summaryLines: string[] = [];
+      for (const pipeline of activePipelines) {
+        pipeline.cancel();
+        const state = pipeline.getState();
+        const completed = [...state.phaseResults.entries()]
+          .filter(([, r]) => r.status === 'completed')
+          .map(([id]) => id);
+        summaryLines.push(`Pipeline ${state.pipelineId}: cancelled (${completed.length} phases completed: ${completed.join(', ') || 'none'})`);
+      }
+
+      // Close all agent sessions
+      if (started) {
+        const mgr = server.getSessionManager();
+        if (mgr) {
+          const sessions = mgr.listActiveSessions();
+          for (const s of sessions) {
+            try { await mgr.closeSession(s.agentName); } catch { /* ignore */ }
+          }
+          summaryLines.push(`Closed ${sessions.length} agent session(s).`);
+        }
+      }
+
+      activePipelines = [];
+      pendingUserQuestions = [];
+      for (const resolver of waitResolvers) {
+        resolver('cancelled');
+      }
+      waitResolvers = [];
+
+      pulseCollector.record(createPulse({
+        agent: 'ben', phase: 'done', status: 'warning', progressPct: 100,
+        summary: 'Run cancelled by user.',
+        blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
+      }));
+
+      return {
+        content: [{ type: 'text', text: summaryLines.join('\n') }],
+      };
     },
   );
 

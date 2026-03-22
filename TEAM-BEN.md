@@ -73,7 +73,7 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 - `squad_wait` to block until something needs attention
 - `squad_status` for quick checks (bypasses Ben)
 - `squad_analyze_run` for post-run analysis (Sage)
-- `squad_cancel` to stop an active run (not yet implemented)
+- `squad_cancel` to stop an active run
 
 ### No Polling — Event-Driven Monitoring
 - `squad_wait` blocks until a user-relevant event occurs (question, error, blocker, done)
@@ -129,23 +129,55 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 | MCP Tools | `src/mcp/server.ts` | squad_run, squad_wait, squad_ask, squad_respond, squad_pulse, squad_analyze_run |
 | Run Analysis | `src/mcp/analyze-run.ts` | Reads pulses + sessions, produces report |
 | SquadTool pulse | `src/tools/index.ts` | squad_pulse registered for agent sessions |
-| Unit Tests | `test/pipeline.test.ts`, `test/pulse.test.ts`, `test/intent-graph.test.ts`, `test/built-in-actors.test.ts` | 42/42 passing |
+| Cancellation | `src/pipeline/runner.ts` | PipelineRunner.cancel() + squad_cancel MCP tool |
+| Unit Tests | `test/pipeline.test.ts`, `test/pulse.test.ts`, `test/intent-graph.test.ts`, `test/built-in-actors.test.ts` | 46/46 passing |
 
 ## What's Incomplete
 
 | Item | Impact |
 |------|--------|
-| Pipeline understand phase vs Q&A loop | Ben asks questions via squad_pulse, user answers via squad_respond, but pipeline waitForResponse grabs Ben's question as the "response" instead of waiting for Ben's final answer after clarification |
+| ~~Pipeline understand phase vs Q&A loop~~ | **FIXED** — waitForResponse now detects pending user questions and waits for Q&A resolution before accepting a response |
 | Intent Graph not updated mid-run | Ben creates it once, never maintains it |
 | Context windowing | Old messages accumulate unbounded in agent sessions |
 | Shared scratchpad | No cross-agent artifact sharing mechanism |
 | Concurrent `squad_run` race | Module-scoped singletons overwritten by second run |
-| `squad_cancel` | No way to stop an active pipeline |
+| ~~`squad_cancel`~~ | **BUILT** — cancels all active pipelines, closes sessions, resolves waiters |
 | MCP wiring tests | The most complex code has zero test coverage |
 | Sage end-to-end test | `squad_analyze_run` exists but not tested with Sage as dispatched agent |
 | Dashboard port stability | Port changes on restart if old process didn't fully exit |
 
-## Session Log (2026-03-22)
+## Session Log (2026-03-22, Session 2)
+
+### What was done this session
+
+1. **Fixed pipeline Q&A loop (Priority 1)**: Modified `waitForResponse` in `server.ts` to be Q&A-aware. When Ben asks clarifying questions via `squad_pulse` (setting `questionsForUser`), the pipeline now detects `pendingUserQuestions.length > 0` and waits for the user to call `squad_respond` before accepting Ben's response. This prevents the pipeline from grabbing Ben's questions as the "understanding" and prematurely advancing to the route phase.
+
+2. **Built `squad_cancel` (Priority 3)**: Added cancellation support to `PipelineRunner` (`cancel()` method with immediate state transition to `'cancelled'`). Cancellation checks at three points: before each layer, before each phase, and before each retry attempt. Added `squad_cancel` MCP tool that cancels all active pipelines, closes all agent sessions, resolves pending `squad_wait` callers, and returns a summary.
+
+3. **Added 'cancelled' status**: Extended `PhaseStatus` and `PipelineState.status` type unions with `'cancelled'` variant in `types.ts`.
+
+4. **Pipeline tracking for cancel**: Server now tracks active `PipelineRunner` instances in `activePipelines` array (both the initial understand+route pipeline and the chained implement+review pipeline). `squad_cancel` iterates all of them.
+
+5. **Tests**: Added 4 new cancel tests to `pipeline.test.ts` covering: cancel before execution, cancel mid-pipeline (skips remaining phases), completedAt set on cancel, and cancelled phase results. All 46 tests pass (up from 42).
+
+6. **Type check clean**: `tsc --noEmit` passes with zero errors.
+
+### What the next session should do
+
+**Priority 1: Verify Coordinator routing end-to-end**
+Restart the MCP server (dist is built) and call `squad_run` to verify the Coordinator LLM actor correctly reads routing.md + roster and picks the right agents. Test with different task types to verify semantics-based routing.
+
+**Priority 2: Run Sage end-to-end**
+Call `squad_analyze_run` after a completed run and verify it produces useful improvement proposals. Dispatch to Sage as an agent to interpret the analysis.
+
+**Priority 3: Remaining items from "What's Incomplete" table:**
+- Intent Graph not updated mid-run (Ben creates it once, never maintains it)
+- Context windowing (old messages accumulate unbounded)
+- Shared scratchpad (no cross-agent artifact sharing)
+- Concurrent `squad_run` race (closure-scoped vars + collector.clear())
+- MCP wiring tests (zero integration test coverage for squad_run flow)
+- Sage end-to-end test
+- Dashboard port stability
 
 ### What was done this session
 

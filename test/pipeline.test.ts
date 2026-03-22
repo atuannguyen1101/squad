@@ -238,4 +238,70 @@ describe('PipelineRunner', () => {
       expect(taskArg).toContain('shell_exec');
     });
   });
+
+  describe('cancel', () => {
+    it('should cancel before any phase executes', async () => {
+      const deps = makeDeps();
+      const runner = new PipelineRunner(makeLinearPipeline(), deps);
+
+      runner.cancel();
+      const state = await runner.run();
+
+      expect(state.status).toBe('cancelled');
+      expect(deps.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('should cancel mid-pipeline and skip remaining phases', async () => {
+      let callCount = 0;
+      const deps = makeDeps({
+        dispatch: vi.fn().mockImplementation(async () => {
+          callCount++;
+          return { sessionId: 's', status: 'success', agentName: 'test' };
+        }),
+        waitForResponse: vi.fn().mockImplementation(async () => {
+          // Cancel after the first phase completes
+          if (callCount === 1) {
+            runner.cancel();
+          }
+          return 'done approve';
+        }),
+      });
+
+      const runner = new PipelineRunner(makeLinearPipeline(), deps);
+      const state = await runner.run();
+
+      expect(state.status).toBe('cancelled');
+      // Only the first phase should have executed
+      expect(callCount).toBe(1);
+    });
+
+    it('should set completedAt when cancelled', () => {
+      const deps = makeDeps();
+      const runner = new PipelineRunner(makeLinearPipeline(), deps);
+
+      runner.cancel();
+      const state = runner.getState();
+
+      expect(state.status).toBe('cancelled');
+      expect(state.completedAt).toBeInstanceOf(Date);
+    });
+
+    it('should return cancelled phase results for unstarted phases', async () => {
+      const deps = makeDeps({
+        dispatch: vi.fn().mockImplementation(async () => {
+          runner.cancel();
+          return { sessionId: 's', status: 'success', agentName: 'test' };
+        }),
+        waitForResponse: vi.fn().mockResolvedValue('done approve'),
+      });
+
+      const runner = new PipelineRunner(makeLinearPipeline(), deps);
+      const state = await runner.run();
+
+      expect(state.status).toBe('cancelled');
+      // First phase dispatched but then cancelled
+      const results = [...state.phaseResults.values()];
+      expect(results.length).toBeGreaterThanOrEqual(1);
+    });
+  });
 });

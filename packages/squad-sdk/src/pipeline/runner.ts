@@ -22,6 +22,7 @@ export class PipelineRunner {
   private definition: PipelineDefinition;
   private deps: PipelineRunnerDeps;
   private state: PipelineState;
+  private cancelled = false;
 
   constructor(definition: PipelineDefinition, deps: PipelineRunnerDeps) {
     this.definition = definition;
@@ -37,6 +38,12 @@ export class PipelineRunner {
     return this.state;
   }
 
+  cancel(): void {
+    this.cancelled = true;
+    this.state.status = 'cancelled';
+    this.state.completedAt = new Date();
+  }
+
   async run(): Promise<PipelineState> {
     this.state.status = 'running';
     this.state.startedAt = new Date();
@@ -45,7 +52,11 @@ export class PipelineRunner {
 
     try {
       await this.executeLayers(order);
-      this.state.status = this.hasFailures() ? 'failed' : 'completed';
+      if (this.cancelled) {
+        this.state.status = 'cancelled';
+      } else {
+        this.state.status = this.hasFailures() ? 'failed' : 'completed';
+      }
     } catch (err) {
       this.state.status = 'failed';
       this.deps.onPipelineComplete?.(this.state);
@@ -59,6 +70,8 @@ export class PipelineRunner {
 
   private async executeLayers(order: string[][]): Promise<void> {
     for (const layer of order) {
+      if (this.cancelled) break;
+
       const phases = layer
         .map(id => this.definition.phases.find(p => p.id === id)!)
         .filter(p => !this.shouldSkip(p));
@@ -76,16 +89,32 @@ export class PipelineRunner {
         }
       }
 
-      if (this.hasFailures()) break;
+      if (this.hasFailures() || this.cancelled) break;
     }
   }
 
   private async executePhase(phase: PhaseDefinition): Promise<PhaseResult> {
+    if (this.cancelled) {
+      const now = new Date();
+      return {
+        phaseId: phase.id, agent: phase.agent, status: 'cancelled',
+        startedAt: now, completedAt: now, attempt: 0, durationMs: 0,
+      };
+    }
+
     const maxAttempts = phase.retries ?? DEFAULT_RETRIES;
     const timeout = phase.timeout ?? DEFAULT_PHASE_TIMEOUT;
     let lastResult: PhaseResult | undefined;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (this.cancelled) {
+        const now = new Date();
+        return {
+          phaseId: phase.id, agent: phase.agent, status: 'cancelled',
+          startedAt: now, completedAt: now, attempt, durationMs: 0,
+        };
+      }
+
       const startedAt = new Date();
       this.deps.onPhaseStart?.(phase.id, phase.agent);
 

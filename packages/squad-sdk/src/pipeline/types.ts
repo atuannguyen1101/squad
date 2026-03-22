@@ -6,7 +6,7 @@
  * to tools scoped to their phase.
  */
 
-export type PhaseStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+export type PhaseStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
 
 export interface PhaseGate<T = unknown> {
   validate: (output: T) => boolean;
@@ -45,7 +45,7 @@ export interface PipelineDefinition {
 
 export interface PipelineState {
   pipelineId: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   phaseResults: Map<string, PhaseResult>;
   startedAt?: Date;
   completedAt?: Date;
