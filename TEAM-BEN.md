@@ -2,7 +2,7 @@
 
 ## Vision
 
-An autonomous AI team that lives in every Squad workspace. You call `squad_run`, Ben understands what you want, the custom squad team does the work, you monitor via `squad_wait`, and Sage learns from each run to make the whole setup better over time.
+An autonomous AI team that lives in every Squad workspace. You call `squad_run`, Ben understands what you want, the Coordinator picks the right agents, the custom squad team does the work, you monitor via `squad_wait`, and Sage learns from each run to make the whole setup better over time.
 
 ## Architecture
 
@@ -13,13 +13,17 @@ You (user)
   v
 Ben (SDK built-in) — understands intent, asks questions, gives updates
   |
-  | PipelineRunner (code-enforced DAG)
+  | PipelineRunner phase 1: understand
   v
-Custom Squad Team (workspace black box) — implements, reviews, whatever agents the workspace defines
+Coordinator (SDK built-in) — reads routing.md + roster, picks implementer/reviewer via LLM
   |
-  | squad_analyze_run (post-run)
+  | PipelineRunner phase 2: route (returns JSON with agent names)
   v
-Sage (SDK built-in) — analyzes run, proposes improvements to SDK/charters/instructions/MCP/skills
+Custom Squad Team (workspace black box) — implements and reviews
+  |
+  | PipelineRunner phases 3-4: implement + review (agents selected by Coordinator)
+  v
+Sage (SDK built-in) — post-run analysis via squad_analyze_run
 ```
 
 ## Three SDK-Level Actors
@@ -32,10 +36,12 @@ Sage (SDK built-in) — analyzes run, proposes improvements to SDK/charters/inst
 - Reports progress and relays questions from the team
 - Workspace can override by creating `.squad/agents/ben/charter.md`
 
-### Coordinator — Internal Router
-- The existing `SquadCoordinator` TypeScript class (code, not LLM)
-- Reads `routing.md`, matches rules, dispatches to agents deterministically
-- Currently: PipelineRunner handles the routing in `squad_run` by reading charters and matching roles
+### Coordinator — Work Router
+- SDK built-in (embedded charter in `built-in-actors.ts`)
+- LLM-based agent selection — understands semantics, not just keyword matching
+- Reads routing.md + agent roster, returns JSON: `{"implementer": "name", "reviewer": "name", "architect": null}`
+- Replaces broken regex matching that picked wrong agents alphabetically
+- One cheap LLM call per run — no ongoing session
 
 ### Sage — Self-Improvement Analyst
 - SDK built-in (embedded charter in `built-in-actors.ts`)
@@ -52,9 +58,9 @@ Sage (SDK built-in) — analyzes run, proposes improvements to SDK/charters/inst
 
 1. `squad_run(message)` — user tells Ben what they want
 2. Ben (understand phase) — parses intent, asks questions if unclear via `squad_pulse`
-3. Architect (plan phase, optional) — reviews feasibility if workspace has an architect-role agent
-4. Implementer (implement phase) — workspace agent matched by role writes code, tests
-5. Reviewer (review phase) — workspace agent matched by role reviews the implementation
+3. Coordinator (route phase) — reads routing.md + roster, picks implementer/reviewer via LLM, returns JSON
+4. Implementer (implement phase) — workspace agent selected by Coordinator writes code, tests
+5. Reviewer (review phase) — workspace agent selected by Coordinator reviews the implementation
 6. Pipeline complete — Ben reports final result via `squad_pulse` with phase "done"
 7. `squad_analyze_run()` — Sage analyzes the completed run (on-demand)
 
@@ -118,17 +124,18 @@ Sage (SDK built-in) — analyzes run, proposes improvements to SDK/charters/inst
 | PipelineRunner | `src/pipeline/` | Working, wired into `squad_run` |
 | Intent Graph | `src/intent/` | Types built, write-once (not updated mid-run) |
 | Pulse Protocol | `src/pulse/` | Working, callback wakes `squad_wait` |
-| Built-in Actors | `src/agents/built-in-actors.ts` | Ben + Sage charters embedded |
+| Built-in Actors | `src/agents/built-in-actors.ts` | Ben + Coordinator + Sage charters embedded |
 | Charter Fallback | `src/server/agent-lifecycle.ts` | 3-tier: workspace > built-in > generic |
 | MCP Tools | `src/mcp/server.ts` | squad_run, squad_wait, squad_ask, squad_respond, squad_pulse, squad_analyze_run |
 | Run Analysis | `src/mcp/analyze-run.ts` | Reads pulses + sessions, produces report |
 | SquadTool pulse | `src/tools/index.ts` | squad_pulse registered for agent sessions |
-| Unit Tests | `test/pipeline.test.ts`, `test/pulse.test.ts`, `test/intent-graph.test.ts`, `test/built-in-actors.test.ts` | 41/41 passing |
+| Unit Tests | `test/pipeline.test.ts`, `test/pulse.test.ts`, `test/intent-graph.test.ts`, `test/built-in-actors.test.ts` | 42/42 passing |
 
 ## What's Incomplete
 
 | Item | Impact |
 |------|--------|
+| Pipeline understand phase vs Q&A loop | Ben asks questions via squad_pulse, user answers via squad_respond, but pipeline waitForResponse grabs Ben's question as the "response" instead of waiting for Ben's final answer after clarification |
 | Intent Graph not updated mid-run | Ben creates it once, never maintains it |
 | Context windowing | Old messages accumulate unbounded in agent sessions |
 | Shared scratchpad | No cross-agent artifact sharing mechanism |
@@ -136,3 +143,4 @@ Sage (SDK built-in) — analyzes run, proposes improvements to SDK/charters/inst
 | `squad_cancel` | No way to stop an active pipeline |
 | MCP wiring tests | The most complex code has zero test coverage |
 | Sage end-to-end test | `squad_analyze_run` exists but not tested with Sage as dispatched agent |
+| Dashboard port stability | Port changes on restart if old process didn't fully exit |
