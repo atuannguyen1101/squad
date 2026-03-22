@@ -9,6 +9,7 @@
 
 import { MCPServer } from './protocol.js';
 import { SquadServer, type SquadServerConfig } from '../server/index.js';
+import { TOOL_CALL_PLACEHOLDER } from '../server/agent-lifecycle.js';
 import type { SquadConfig } from '../runtime/config.js';
 import { createPulse, formatPulseForUser, type PulsePhase, type PulseStatus } from '../pulse/index.js';
 import { createEmptyIntentGraph, serializeIntentGraph, updateIntentGraph, parseUnderstandPhaseOutput, parseRoutePhaseOutput, type IntentGraph } from '../intent/index.js';
@@ -567,6 +568,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       activeRunId = runId;
       activeIntentGraph = createEmptyIntentGraph(args.message);
       pulseCollector.clear();
+      server.getScratchpad().clear();
       pendingUserQuestions = [];
       activePipelines = [];
 
@@ -671,13 +673,16 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           }
         },
         onPipelineComplete: (state) => {
+          // Only emit a progress pulse here — this is the understand+route
+          // pipeline, NOT the full run.  The real "done" pulse is emitted
+          // after the impl+review pipeline finishes (see below).
           pulseCollector.record(createPulse({
-            agent: 'ben', phase: state.status === 'completed' ? 'done' : 'blocked',
+            agent: 'ben', phase: state.status === 'completed' ? 'implementing' : 'blocked',
             status: state.status === 'completed' ? 'ok' : 'error',
-            progressPct: 100,
+            progressPct: state.status === 'completed' ? 30 : 100,
             summary: state.status === 'completed'
-              ? 'Pipeline complete. All phases passed.'
-              : 'Pipeline failed. Check phase results.',
+              ? 'Routing complete. Starting implementation pipeline.'
+              : 'Routing failed. Check phase results.',
             blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
           }));
         },
@@ -769,8 +774,17 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
               'When done, emit squad_pulse with phase "done" listing the files you created or modified.',
             ].join('\n'),
             gate: {
-              validate: (o: unknown) => typeof o === 'string' && (o as string).length > 50,
-              description: 'Implementer must produce substantial output',
+              validate: (o: unknown) => {
+                // Accept if the agent produced substantial text output
+                // (but not if it's just the tool-call placeholder)
+                if (typeof o === 'string' && o !== TOOL_CALL_PLACEHOLDER && o.length > 50) return true;
+                // Also accept if the agent emitted a "done" pulse — this covers
+                // agents that do work via tool calls (file edits, commands) and
+                // report completion through squad_pulse instead of text.
+                const agentPulses = pulseCollector.getByAgent(implName);
+                return agentPulses.some(p => p.phase === 'done');
+              },
+              description: 'Implementer must produce substantial output or emit a done pulse',
             },
             timeout: 300_000,
           },
@@ -786,23 +800,64 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             ].join('\n'),
             dependsOn: ['implement'],
             gate: {
-              validate: (o: unknown) => typeof o === 'string' && (o as string).length > 20,
-              description: 'Reviewer must produce a substantive review',
+              validate: (o: unknown) => {
+                if (typeof o === 'string' && o !== TOOL_CALL_PLACEHOLDER && o.length > 20) return true;
+                const agentPulses = pulseCollector.getByAgent(revName);
+                return agentPulses.some(p => p.phase === 'done');
+              },
+              description: 'Reviewer must produce a substantive review or emit a done pulse',
             },
             timeout: 300_000,
           },
         ];
 
+        const implPipelineDeps: PipelineRunnerDeps = {
+          ...pipelineDeps,
+          dispatch: async (agentName: string, task: string, context?: string) => {
+            const result = await server.dispatch(agentName, task, context);
+            // sendAndWait returns on the FIRST response turn, but agents doing
+            // multi-step work (file edits, tests, builds) keep executing.
+            // Wait for the agent's "done" pulse before returning — this prevents
+            // the pipeline from evaluating the gate on a partial early response.
+            const donePulse = await pulseCollector.waitForDonePulse(
+              agentName,
+              (implPhases.find(p => p.agent === agentName)?.timeout ?? 300_000) - 5_000,
+            );
+            // After the done pulse (or timeout), grab the latest assistant reply
+            const msgs = mgr.getMessages(agentName);
+            const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
+            return {
+              sessionId: result.sessionId,
+              status: result.status,
+              agentName: result.agentName,
+              response: lastReply?.content ?? (donePulse?.summary ?? undefined),
+            };
+          },
+        };
+
         const implPipeline = new PipelineRunner(
           { id: `impl-${Date.now()}`, name: 'Implementation', phases: implPhases },
-          pipelineDeps,
+          implPipelineDeps,
         );
         activePipelines.push(implPipeline);
-        await implPipeline.run();
+        const implState = await implPipeline.run();
+
+        // Emit the REAL "Pipeline complete" pulse — all four phases
+        // (understand, route, implement, review) have now finished.
+        // This is the signal that squad_wait should wake on.
+        pulseCollector.record(createPulse({
+          agent: 'ben', phase: implState.status === 'completed' ? 'done' : 'blocked',
+          status: implState.status === 'completed' ? 'ok' : 'error',
+          progressPct: 100,
+          summary: implState.status === 'completed'
+            ? 'Pipeline complete. All phases passed.'
+            : 'Pipeline failed. Check phase results.',
+          blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
+        }));
       }).catch((err) => {
         pulseCollector.record(createPulse({
-          agent: 'ben', phase: 'blocked', status: 'error', progressPct: 0,
-          summary: `Pipeline error: ${err instanceof Error ? err.message : String(err)}`,
+          agent: 'ben', phase: 'blocked', status: 'error', progressPct: 100,
+          summary: `Pipeline failed: ${err instanceof Error ? err.message : String(err)}`,
           blockers: [String(err)], questionsForUser: [], artifacts: [], nextStep: '',
         }));
       }).finally(() => {

@@ -25,6 +25,7 @@ import { AgentSessionManager, type AgentSessionManagerConfig, type DispatchResul
 import { ServerPersistence, type PersistenceConfig, type ServerStateSnapshot } from './persistence.js';
 import { EventHistory, type HistoryEvent } from './event-history.js';
 import { PulseCollector, createPulse as createPulseFn, filterPulseForUser as filterPulseFn } from '../pulse/index.js';
+import { Scratchpad } from '../scratchpad/index.js';
 
 // ============================================================================
 // Types
@@ -73,6 +74,7 @@ export class SquadServer {
   private readonly toolRegistry: ToolRegistry;
   private readonly persistence: ServerPersistence;
   private readonly pulseCollector: PulseCollector;
+  private readonly scratchpad: Scratchpad;
   private readonly serverStartedAt: string;
 
   private client: SquadClientWithPool | null = null;
@@ -113,6 +115,7 @@ export class SquadServer {
     // Initialize ToolRegistry with lazy getters so it can reference
     // components that aren't created until start().
     this.pulseCollector = new PulseCollector();
+    this.scratchpad = new Scratchpad();
 
     this.toolRegistry = new ToolRegistry(
       // squadRoot for file-based tools (decisions, history, skills)
@@ -162,6 +165,8 @@ export class SquadServer {
           return collector.record(p);
         };
       },
+      // scratchpadGetter — returns the shared scratchpad
+      () => this.scratchpad,
     );
   }
 
@@ -314,8 +319,9 @@ export class SquadServer {
       this.client = null;
     }
 
-    // 4. Clear event handlers
+    // 4. Clear event handlers and ephemeral state
     this.eventBus.clear();
+    this.scratchpad.clear();
 
     this.coordinator = null;
     this.running = false;
@@ -434,6 +440,10 @@ export class SquadServer {
     return this.pulseCollector;
   }
 
+  getScratchpad(): Scratchpad {
+    return this.scratchpad;
+  }
+
   /**
    * Whether the server is currently running.
    */
@@ -445,6 +455,8 @@ export class SquadServer {
 // Re-export lifecycle types for consumers
 export {
   AgentSessionManager,
+  extractResponseContent,
+  TOOL_CALL_PLACEHOLDER,
   type AgentSessionManagerConfig,
   type AgentSessionEntry,
   type DispatchResult,

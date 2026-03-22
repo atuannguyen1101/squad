@@ -81,6 +81,7 @@ export class PulseCollector {
   private pulses: Pulse[] = [];
   private userQueue: Pulse[] = [];
   private onUserRelevantPulse?: (pulse: Pulse) => void;
+  private pulseListeners: Array<(pulse: Pulse) => void> = [];
 
   setOnUserRelevantPulse(callback: (pulse: Pulse) => void): void {
     this.onUserRelevantPulse = callback;
@@ -93,7 +94,65 @@ export class PulseCollector {
       this.userQueue.push(pulse);
       this.onUserRelevantPulse?.(pulse);
     }
+    // Notify all pulse listeners (used by waitForDonePulse)
+    for (const listener of this.pulseListeners) {
+      try { listener(pulse); } catch { /* listener errors are non-fatal */ }
+    }
     return filter;
+  }
+
+  /**
+   * Subscribe to ALL pulses (not just user-relevant ones).
+   * Returns an unsubscribe function.
+   */
+  onPulse(listener: (pulse: Pulse) => void): () => void {
+    this.pulseListeners.push(listener);
+    return () => {
+      const idx = this.pulseListeners.indexOf(listener);
+      if (idx !== -1) this.pulseListeners.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Wait until a specific agent emits a pulse with the given phase.
+   * Checks already-recorded pulses first, then subscribes for new ones.
+   * Returns the matching pulse, or null on timeout.
+   *
+   * Also resolves early if the agent emits an 'error' status or 'blocked' phase,
+   * since those indicate the agent won't reach 'done'.
+   */
+  waitForDonePulse(
+    agentName: string,
+    timeoutMs: number,
+    targetPhase: PulsePhase = 'done',
+  ): Promise<Pulse | null> {
+    // Check if we already have a matching pulse
+    const existing = this.pulses.find(
+      p => p.agent === agentName && (p.phase === targetPhase || p.status === 'error' || p.phase === 'blocked'),
+    );
+    if (existing) return Promise.resolve(existing);
+
+    return new Promise<Pulse | null>((resolve) => {
+      let settled = false;
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        unsub();
+        resolve(null);
+      }, timeoutMs);
+
+      const unsub = this.onPulse((pulse) => {
+        if (settled) return;
+        if (pulse.agent !== agentName) return;
+        if (pulse.phase === targetPhase || pulse.status === 'error' || pulse.phase === 'blocked') {
+          settled = true;
+          clearTimeout(timer);
+          unsub();
+          resolve(pulse);
+        }
+      });
+    });
   }
 
   drainUserQueue(): Pulse[] {

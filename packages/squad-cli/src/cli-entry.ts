@@ -115,9 +115,10 @@ async function main(): Promise<void> {
   const rawCmd = args[0];
   const cmd = rawCmd?.trim() || '';
 
-  // --version / -v
-  if (cmd === '--version' || cmd === '-v') {
-    console.log(VERSION);
+  // --version / -v / version
+  if (cmd === '--version' || cmd === '-v' || cmd === 'version') {
+    const { versionCommand } = await import('./cli/commands/version.js');
+    await versionCommand();
     return;
   }
 
@@ -171,6 +172,8 @@ async function main(): Promise<void> {
     console.log(`  ${BOLD}nap${RESET}        Context hygiene (compress, prune, archive .squad/ state)`);
     console.log(`             Usage: nap [--deep] [--dry-run]`);
     console.log(`             Flags: --deep (thorough cleanup), --dry-run (preview only)`);
+    console.log(`  ${BOLD}hello${RESET}      Print a friendly greeting from the team`);
+    console.log(`  ${BOLD}greet${RESET}      Print "Hello World"`);
     console.log(`  ${BOLD}doctor${RESET}     Validate squad setup (check files, config, health)`);
     console.log(`  ${BOLD}consult${RESET}    Enter consult mode with your personal squad`);
     console.log(`             Flags: --status, --check`);
@@ -202,6 +205,7 @@ async function main(): Promise<void> {
     console.log(`  ${BOLD}mcp${RESET}        Start MCP server for Copilot integration`);
     console.log(`             Usage: mcp [--squad-root <path>]`);
 
+    console.log(`  ${BOLD}version${RESET}    Print version`);
     console.log(`  ${BOLD}help${RESET}       Show this help message`);
     console.log(`\nFlags:`);
     console.log(`  ${BOLD}--version, -v${RESET}  Print version`);
@@ -454,6 +458,18 @@ async function main(): Promise<void> {
     const dryRun = args.includes('--dry-run');
     const result = await runNap({ squadDir, deep, dryRun });
     console.log(formatNapReport(result, !!process.env['NO_COLOR']));
+    return;
+  }
+
+  if (cmd === 'hello') {
+    const { helloCommand } = await import('./cli/commands/hello.js');
+    await helloCommand();
+    return;
+  }
+
+  if (cmd === 'greet') {
+    const { greetCommand } = await import('./cli/commands/greet.js');
+    await greetCommand();
     return;
   }
 

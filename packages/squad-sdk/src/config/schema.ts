@@ -65,10 +65,12 @@ export interface HooksConfig {
 
 export interface CeremonyConfig {
   name: string;
+  trigger?: 'all-sessions-closed' | 'pipeline-idle' | 'manual';
   schedule?: string;
   participants?: string[];
   agenda?: string;
   enabled?: boolean;
+  idleTimeoutMs?: number;
 }
 
 export interface PluginConfig {

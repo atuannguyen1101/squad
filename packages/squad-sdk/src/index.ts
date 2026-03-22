@@ -94,3 +94,9 @@ export * from './intent/index.js';
 
 // Pulse Protocol (Structured agent status)
 export * from './pulse/index.js';
+
+// Context Windowing (Auto-summarization)
+export * from './context/index.js';
+
+// Scratchpad (Cross-agent artifact sharing)
+export * from './scratchpad/index.js';

@@ -20,6 +20,12 @@ import { getBuiltInActor } from '../agents/built-in-actors.js';
 import type { ServerPersistence, SessionRegistryEntry, ServerStateSnapshot } from './persistence.js';
 import { CeremonyTriggerEngine } from './ceremony-triggers.js';
 import type { CeremonyConfig } from '../config/schema.js';
+import {
+  applyContextWindow,
+  createContextWindowState,
+  type ContextWindowConfig,
+  type ContextWindowState,
+} from '../context/index.js';
 
 // ============================================================================
 // Types
@@ -42,6 +48,8 @@ export interface AgentSessionManagerConfig {
   mcpServers?: Record<string, SquadMCPServerConfig>;
   /** Ceremony configurations for auto-dispatch after pipeline completion */
   ceremonies?: CeremonyConfig[];
+  /** Context windowing configuration. If provided, auto-summarization is enabled. */
+  contextWindowConfig?: Partial<ContextWindowConfig>;
 }
 
 export interface SessionMessage {
@@ -63,6 +71,8 @@ export interface AgentSessionEntry {
   lastActiveAt: Date;
   /** Captured conversation messages */
   messages: SessionMessage[];
+  /** Context windowing state — tracks summarization progress */
+  contextWindowState: ContextWindowState;
 }
 
 export interface DispatchResult {
@@ -85,6 +95,31 @@ export interface ActiveSessionInfo {
 
 // Maximum bytes of history to include in the compiled charter prompt
 const MAX_HISTORY_BYTES = 2048;
+
+/**
+ * Placeholder message recorded when an agent completes its turn via tool calls
+ * (file edits, commands) but returns no text response. Exported so gates can
+ * distinguish it from real agent output.
+ */
+export const TOOL_CALL_PLACEHOLDER = '[Agent completed turn — work performed via tool calls]';
+
+/**
+ * Extract text content from a sendAndWait response.
+ * Returns null when the response is empty, undefined, or contains no text —
+ * which typically means the agent did work via tool calls only.
+ */
+export function extractResponseContent(result: unknown): string | null {
+  if (result == null) return null;
+  if (typeof result === 'string') return result.length > 0 ? result : null;
+  const r = result as Record<string, unknown>;
+  if (typeof r.text === 'string' && (r.text as string).length > 0) return r.text as string;
+  if (r.data && typeof (r.data as Record<string, unknown>).content === 'string') {
+    const c = String((r.data as Record<string, unknown>).content);
+    return c.length > 0 ? c : null;
+  }
+  if (typeof r.content === 'string' && (r.content as string).length > 0) return r.content as string;
+  return null;
+}
 
 /**
  * Resolve a potentially abbreviated agent name to the full directory name
@@ -175,6 +210,7 @@ export class AgentSessionManager {
   private readonly charterCompiler: CharterCompiler;
   private readonly mcpServers: Record<string, SquadMCPServerConfig> | undefined;
   private readonly ceremonyEngine: CeremonyTriggerEngine | null;
+  private readonly contextWindowConfig: Partial<ContextWindowConfig> | undefined;
 
   /** Optional persistence layer for crash recovery */
   private persistence: ServerPersistence | null = null;
@@ -192,6 +228,7 @@ export class AgentSessionManager {
     this.workingDirectory = config.workingDirectory;
     this.charterCompiler = new CharterCompiler();
     this.mcpServers = config.mcpServers ?? loadUserMCPServers();
+    this.contextWindowConfig = config.contextWindowConfig;
     this.ceremonyEngine = config.ceremonies?.length
       ? new CeremonyTriggerEngine(
           config.ceremonies,
@@ -261,6 +298,15 @@ export class AgentSessionManager {
     const charter = await this.compileCharter(resolved);
     const systemPrompt = await this.buildSystemPrompt(resolved, charter);
 
+    // SDK-enforced tool restrictions for built-in actors.
+    // Built-in actors (Ben, Coordinator, Sage) get ONLY their allowedTools —
+    // no file access, no git, no code analysis. This prevents role boundary
+    // violations deterministically through code, not charter prose.
+    const builtIn = getBuiltInActor(resolved);
+    const sessionTools = builtIn?.allowedTools
+      ? this.tools.filter(t => builtIn.allowedTools!.includes(t.name))
+      : this.tools;
+
     // Note: MCP tools are provided via the MCP Bridge (tools/mcp-bridge.ts) which
     // spawns MCP servers at squad server startup and registers their tools as squad tools.
     // The native SessionConfig.mcpServers path is not used because the copilot CLI
@@ -268,7 +314,7 @@ export class AgentSessionManager {
 
     const sessionConfig: SquadSessionConfig = {
       model: charter.modelPreference ?? this.defaultModel,
-      tools: this.tools,
+      tools: sessionTools,
       systemMessage: {
         mode: 'replace' as const,
         content: systemPrompt,
@@ -287,6 +333,7 @@ export class AgentSessionManager {
       createdAt: now,
       lastActiveAt: now,
       messages: [],
+      contextWindowState: createContextWindowState(),
     };
     this.sessions.set(resolved, entry);
 
@@ -350,13 +397,20 @@ export class AgentSessionManager {
     if (session.sendAndWait) {
       try {
         const result = await session.sendAndWait({ prompt }, 300_000);
-        const content = typeof result === 'string' ? result
-          : result && typeof (result as any).text === 'string' ? (result as any).text
-          : result && (result as any).data?.content ? String((result as any).data.content)
-          : result && typeof (result as any).content === 'string' ? (result as any).content
-          : null;
-        if (content && entry) {
-          entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
+        const content = extractResponseContent(result);
+        if (entry) {
+          if (content) {
+            entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
+          } else if (result != null) {
+            // Agent completed its turn but returned empty text — likely did work via
+            // tool calls (file edits, commands). Record a placeholder so waitForResponse
+            // can detect that the turn finished instead of timing out.
+            entry.messages.push({
+              role: 'assistant',
+              content: TOOL_CALL_PLACEHOLDER,
+              timestamp: new Date().toISOString(),
+            });
+          }
         }
       } catch {
         // Timeout or error — fall back to fire-and-forget
@@ -369,6 +423,11 @@ export class AgentSessionManager {
     // Persist updated lastMessageAt
     if (this.persistence) {
       try { this.persistence.saveRegistry(this.getRegistryEntries()); } catch { /* best-effort */ }
+    }
+
+    // Apply context windowing if configured
+    if (this.contextWindowConfig && entry) {
+      await this.maybeApplyContextWindow(entry);
     }
 
     await this.eventBus.emit({
@@ -609,13 +668,14 @@ export class AgentSessionManager {
     if (entry.session.sendAndWait) {
       try {
         const result = await entry.session.sendAndWait({ prompt: message }, 120_000);
-        const content = typeof result === 'string' ? result
-          : result && typeof (result as any).text === 'string' ? (result as any).text
-          : result && (result as any).data?.content ? String((result as any).data.content)
-          : result && typeof (result as any).content === 'string' ? (result as any).content
-          : null;
+        const content = extractResponseContent(result);
         if (content) {
           entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
+        } else if (result != null) {
+          // Agent completed its turn with empty text — likely did work via tool calls.
+          const placeholder = TOOL_CALL_PLACEHOLDER;
+          entry.messages.push({ role: 'assistant', content: placeholder, timestamp: new Date().toISOString() });
+          return placeholder;
         }
         return content;
       } catch {
@@ -676,6 +736,31 @@ export class AgentSessionManager {
       };
       setTimeout(check, idleMs);
     });
+  }
+
+  /**
+   * Apply context windowing to a session if the message count exceeds the threshold.
+   * Replaces older messages with a summary to keep token usage bounded.
+   *
+   * Scope: This operates on Squad's tracking layer (entry.messages), which is the
+   * source for squad_read_session, inter-agent communication, and observability.
+   * The Copilot SDK session maintains its own LLM context internally.
+   */
+  private async maybeApplyContextWindow(entry: AgentSessionEntry): Promise<void> {
+    try {
+      const result = await applyContextWindow(
+        entry.messages,
+        entry.contextWindowState,
+        this.contextWindowConfig,
+      );
+
+      if (result.summarized) {
+        entry.messages = result.messages;
+        entry.contextWindowState = result.state;
+      }
+    } catch {
+      // Context windowing failure is non-fatal — continue with full history
+    }
   }
 
   /**

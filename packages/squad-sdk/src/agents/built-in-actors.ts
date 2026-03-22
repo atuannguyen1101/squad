@@ -12,6 +12,15 @@ export interface BuiltInActor {
   expertise: string[];
   style: string;
   charter: string;
+  /**
+   * SDK-enforced tool whitelist for this built-in actor.
+   * When set, the actor's session will ONLY receive these tools —
+   * no file access, no git, no code analysis. This is the structural
+   * enforcement mechanism; charter prose is a fallback, not a guarantee.
+   *
+   * undefined means "all tools" (backward compat for future actors).
+   */
+  allowedTools?: string[];
 }
 
 const BEN_CHARTER = `# Ben — User Liaison
@@ -154,6 +163,8 @@ export const BUILT_IN_ACTORS: Record<string, BuiltInActor> = {
     expertise: ['Intent clarification', 'task decomposition', 'user communication', 'progress reporting'],
     style: 'Direct, conversational, asks good questions.',
     charter: BEN_CHARTER,
+    // Ben delegates ALL substantive work — no file, git, or code analysis tools.
+    allowedTools: ['squad_route', 'squad_send', 'squad_pulse', 'squad_read_session', 'squad_status'],
   },
   coordinator: {
     name: 'coordinator',
@@ -162,6 +173,8 @@ export const BUILT_IN_ACTORS: Record<string, BuiltInActor> = {
     expertise: ['Agent selection', 'routing rules', 'role matching'],
     style: 'Concise. Returns structured JSON.',
     charter: COORDINATOR_CHARTER,
+    // Coordinator reads context and picks agents — no dispatch, no file access.
+    allowedTools: ['squad_pulse', 'squad_read_session', 'squad_status'],
   },
   sage: {
     name: 'sage',
@@ -170,6 +183,8 @@ export const BUILT_IN_ACTORS: Record<string, BuiltInActor> = {
     expertise: ['Run analysis', 'agentic setup optimization', 'charter quality', 'routing accuracy'],
     style: 'Analytical, evidence-based, proposes concrete changes.',
     charter: SAGE_CHARTER,
+    // Sage analyzes and proposes — reads sessions, records decisions, no dispatch or file access.
+    allowedTools: ['squad_pulse', 'squad_read_session', 'squad_status', 'squad_decide', 'squad_memory', 'squad_skill'],
   },
 };
 

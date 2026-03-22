@@ -304,6 +304,9 @@ export interface SquadConfig {
   /** Platform-specific overrides */
   platforms?: PlatformOverrides;
   
+  /** Ceremony configurations for post-pipeline auto-dispatch */
+  ceremonies?: import('../config/schema.js').CeremonyConfig[];
+  
   /** Custom extensions */
   [key: string]: unknown;
 }

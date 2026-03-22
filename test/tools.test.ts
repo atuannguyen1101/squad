@@ -78,16 +78,22 @@ describe('ToolRegistry', () => {
   });
 
   describe('registration', () => {
-    it('should register all five squad tools', () => {
+    it('should register all squad tools', () => {
       const tools = registry.getTools();
-      expect(tools.length).toBe(5);
+      expect(tools.length).toBe(11);
 
       const toolNames = tools.map(t => t.name);
       expect(toolNames).toContain('squad_route');
+      expect(toolNames).toContain('squad_send');
+      expect(toolNames).toContain('squad_read_session');
       expect(toolNames).toContain('squad_decide');
       expect(toolNames).toContain('squad_memory');
       expect(toolNames).toContain('squad_status');
       expect(toolNames).toContain('squad_skill');
+      expect(toolNames).toContain('squad_pulse');
+      expect(toolNames).toContain('squad_scratchpad_write');
+      expect(toolNames).toContain('squad_scratchpad_read');
+      expect(toolNames).toContain('squad_scratchpad_list');
     });
 
     it('should register tools with descriptions and parameters', () => {
@@ -103,7 +109,7 @@ describe('ToolRegistry', () => {
     it('should return all registered tools', () => {
       const tools = registry.getTools();
       expect(Array.isArray(tools)).toBe(true);
-      expect(tools.length).toBe(5);
+      expect(tools.length).toBe(11);
     });
 
     it('should return tools with handler functions', () => {
@@ -117,7 +123,7 @@ describe('ToolRegistry', () => {
   describe('getToolsForAgent', () => {
     it('should return all tools when no filter provided', () => {
       const tools = registry.getToolsForAgent();
-      expect(tools.length).toBe(5);
+      expect(tools.length).toBe(11);
     });
 
     it('should filter tools by allowed list', () => {
@@ -259,14 +265,14 @@ describe('squad_decide handler', () => {
       resultType: 'success',
     });
 
-    const inboxDir = path.join(testRoot, 'decisions', 'inbox');
+    const inboxDir = path.join(testRoot, '.squad', 'decisions', 'inbox');
     expect(fs.existsSync(inboxDir)).toBe(true);
 
     const files = fs.readdirSync(inboxDir);
     expect(files.length).toBe(1);
     expect(files[0]).toMatch(/^fenster-use-typescript-for-all-new-code\.md$/);
 
-    const content = fs.readFileSync(path.join(inboxDir, files[0]), 'utf-8');
+    const content = fs.readFileSync(path.join(inboxDir, files[0]!), 'utf-8');
     expect(content).toContain('Use TypeScript for all new code');
     expect(content).toContain('**By:** fenster');
     expect(content).toContain('**What:**');
@@ -295,9 +301,9 @@ describe('squad_decide handler', () => {
       resultType: 'success',
     });
 
-    const inboxDir = path.join(testRoot, 'decisions', 'inbox');
+    const inboxDir = path.join(testRoot, '.squad', 'decisions', 'inbox');
     const files = fs.readdirSync(inboxDir);
-    const content = fs.readFileSync(path.join(inboxDir, files[0]), 'utf-8');
+    const content = fs.readFileSync(path.join(inboxDir, files[0]!), 'utf-8');
     
     expect(content).toContain('Short decision');
     expect(content).toContain('**By:** brady');
@@ -313,8 +319,8 @@ describe('squad_memory handler', () => {
     testRoot = path.join('.', '.test-squad-memory-' + randomUUID());
     registry = new ToolRegistry(testRoot);
 
-    // Create test agent history file
-    const agentDir = path.join(testRoot, 'agents', 'fenster');
+    // Create test agent history file — handler expects .squad/agents/{name}/history.md
+    const agentDir = path.join(testRoot, '.squad', 'agents', 'fenster');
     fs.mkdirSync(agentDir, { recursive: true });
     
     const historyContent = `# Fenster's History
@@ -363,7 +369,7 @@ Initial session entry.
       resultType: 'success',
     });
 
-    const historyFile = path.join(testRoot, 'agents', 'fenster', 'history.md');
+    const historyFile = path.join(testRoot, '.squad', 'agents', 'fenster', 'history.md');
     const content = fs.readFileSync(historyFile, 'utf-8');
     
     expect(content).toContain('Learned how to implement ToolRegistry');
@@ -380,7 +386,7 @@ Initial session entry.
 
   it('should create section if it does not exist', async () => {
     // Create a history file without Sessions section
-    const agentDir = path.join(testRoot, 'agents', 'brady');
+    const agentDir = path.join(testRoot, '.squad', 'agents', 'brady');
     fs.mkdirSync(agentDir, { recursive: true });
     fs.writeFileSync(path.join(agentDir, 'history.md'), '# Brady History\n\n## Learnings\n', 'utf-8');
 
@@ -403,7 +409,7 @@ Initial session entry.
       resultType: 'success',
     });
 
-    const historyFile = path.join(testRoot, 'agents', 'brady', 'history.md');
+    const historyFile = path.join(testRoot, '.squad', 'agents', 'brady', 'history.md');
     const content = fs.readFileSync(historyFile, 'utf-8');
     
     expect(content).toContain('## Sessions');

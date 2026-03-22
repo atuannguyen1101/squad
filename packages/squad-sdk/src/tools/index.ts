@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { SquadTool, SquadToolResult } from '../adapter/types.js';
 import { createPulse, filterPulseForUser, type PulseFilter } from '../pulse/index.js';
+import type { Scratchpad } from '../scratchpad/index.js';
 import { trace, SpanStatusCode } from '../runtime/otel-api.js';
 
 const tracer = trace.getTracer('squad-sdk');
@@ -111,6 +112,29 @@ export interface PulseRequest {
   nextStep?: string;
 }
 
+export interface ScratchpadWriteRequest {
+  /** Key for the artifact (recommended: `agent:name`) */
+  key: string;
+  /** Value to store */
+  value: string;
+  /** Agent name writing the artifact */
+  producer: string;
+  /** Optional tags for filtering */
+  tags?: string[];
+}
+
+export interface ScratchpadReadRequest {
+  /** Key to read */
+  key: string;
+}
+
+export interface ScratchpadListRequest {
+  /** Filter by producer agent */
+  producer?: string;
+  /** Filter by tag */
+  tag?: string;
+}
+
 // --- Tool Definition Helper ---
 
 /**
@@ -179,6 +203,7 @@ export class ToolRegistry {
   private sendFollowUpGetter?: () => ((agentName: string, message: string) => Promise<string | null>) | undefined;
   private getMessagesGetter?: () => ((agentName: string) => { role: string; content: string; timestamp: string }[]) | undefined;
   private pulseRecordGetter?: () => ((pulse: PulseRequest) => PulseFilter) | undefined;
+  private scratchpadGetter?: () => Scratchpad | null;
 
   constructor(
     squadRoot = '.squad',
@@ -187,6 +212,7 @@ export class ToolRegistry {
     sendFollowUpGetter?: () => ((agentName: string, message: string) => Promise<string | null>) | undefined,
     getMessagesGetter?: () => ((agentName: string) => { role: string; content: string; timestamp: string }[]) | undefined,
     pulseRecordGetter?: () => ((pulse: PulseRequest) => PulseFilter) | undefined,
+    scratchpadGetter?: () => Scratchpad | null,
   ) {
     this.squadRoot = squadRoot;
     this.sessionPoolGetter = sessionPoolGetter;
@@ -194,6 +220,7 @@ export class ToolRegistry {
     this.sendFollowUpGetter = sendFollowUpGetter;
     this.getMessagesGetter = getMessagesGetter;
     this.pulseRecordGetter = pulseRecordGetter;
+    this.scratchpadGetter = scratchpadGetter;
     this.registerSquadTools();
   }
 
@@ -759,6 +786,122 @@ export class ToolRegistry {
       },
     });
     this.tools.set('squad_pulse', squadPulse);
+
+    // squad_scratchpad_write: Write to shared scratchpad
+    const squadScratchpadWrite = defineTool<ScratchpadWriteRequest>({
+      name: 'squad_scratchpad_write',
+      description: 'Write a value to the shared scratchpad. Any agent can read values written by any other agent. Cleared between runs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: 'Key for the artifact (recommended format: agent:name)' },
+          value: { type: 'string', description: 'Value to store' },
+          producer: { type: 'string', description: 'Agent name writing the artifact' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Optional tags for filtering' },
+        },
+        required: ['key', 'value', 'producer'],
+      },
+      handler: async (args) => {
+        const pad = this.scratchpadGetter?.();
+        if (!pad) {
+          return {
+            textResultForLlm: 'Scratchpad not available — server not connected.',
+            resultType: 'failure' as const,
+            error: 'No scratchpad available',
+          };
+        }
+        const result = pad.write(args.key, args.value, args.producer, args.tags ?? []);
+        if (!result.success) {
+          return {
+            textResultForLlm: `Scratchpad write failed: ${result.error}`,
+            resultType: 'failure' as const,
+            error: result.error,
+          };
+        }
+        return {
+          textResultForLlm: `Scratchpad: ${result.created ? 'created' : 'updated'} key "${args.key}" (${args.value.length} chars)`,
+          resultType: 'success' as const,
+        };
+      },
+    });
+    this.tools.set('squad_scratchpad_write', squadScratchpadWrite);
+
+    // squad_scratchpad_read: Read from shared scratchpad
+    const squadScratchpadRead = defineTool<ScratchpadReadRequest>({
+      name: 'squad_scratchpad_read',
+      description: 'Read a value from the shared scratchpad by key. Returns the value and metadata.',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: 'Key to read' },
+        },
+        required: ['key'],
+      },
+      handler: async (args) => {
+        const pad = this.scratchpadGetter?.();
+        if (!pad) {
+          return {
+            textResultForLlm: 'Scratchpad not available — server not connected.',
+            resultType: 'failure' as const,
+            error: 'No scratchpad available',
+          };
+        }
+        const entry = pad.read(args.key);
+        if (!entry) {
+          return {
+            textResultForLlm: `Scratchpad: key "${args.key}" not found.`,
+            resultType: 'success' as const,
+          };
+        }
+        return {
+          textResultForLlm: `Scratchpad [${entry.key}] by ${entry.producer} (${entry.updatedAt}):\n${entry.value}`,
+          resultType: 'success' as const,
+        };
+      },
+    });
+    this.tools.set('squad_scratchpad_read', squadScratchpadRead);
+
+    // squad_scratchpad_list: List scratchpad entries
+    const squadScratchpadList = defineTool<ScratchpadListRequest>({
+      name: 'squad_scratchpad_list',
+      description: 'List all keys in the shared scratchpad. Optionally filter by producer agent or tag.',
+      parameters: {
+        type: 'object',
+        properties: {
+          producer: { type: 'string', description: 'Filter by producer agent' },
+          tag: { type: 'string', description: 'Filter by tag' },
+        },
+      },
+      handler: async (args) => {
+        const pad = this.scratchpadGetter?.();
+        if (!pad) {
+          return {
+            textResultForLlm: 'Scratchpad not available — server not connected.',
+            resultType: 'failure' as const,
+            error: 'No scratchpad available',
+          };
+        }
+        const entries = pad.list(args);
+        if (entries.length === 0) {
+          const filterDesc = args.producer || args.tag
+            ? ` (filter: ${[args.producer && `producer=${args.producer}`, args.tag && `tag=${args.tag}`].filter(Boolean).join(', ')})`
+            : '';
+          return {
+            textResultForLlm: `Scratchpad is empty${filterDesc}.`,
+            resultType: 'success' as const,
+          };
+        }
+        const stats = pad.stats();
+        const listing = entries.map(e =>
+          `- ${e.key} (by ${e.producer}, ${e.value.length} chars${e.tags.length > 0 ? `, tags: ${e.tags.join(',')}` : ''})`,
+        ).join('\n');
+        return {
+          textResultForLlm: `Scratchpad: ${stats.entryCount} entries, ${stats.totalSize} chars total\n${listing}`,
+          resultType: 'success' as const,
+        };
+      },
+    });
+    this.tools.set('squad_scratchpad_list', squadScratchpadList);
   }
 
   /** Get all registered tools for session config */
