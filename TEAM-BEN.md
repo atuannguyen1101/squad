@@ -144,3 +144,51 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 | MCP wiring tests | The most complex code has zero test coverage |
 | Sage end-to-end test | `squad_analyze_run` exists but not tested with Sage as dispatched agent |
 | Dashboard port stability | Port changes on restart if old process didn't fully exit |
+
+## Session Log (2026-03-22)
+
+### What was done this session
+
+1. Read and understood the entire Squad SDK codebase (architecture, MCP tools, coordinator, session pool, charter compiler, casting, hooks, remote control)
+2. Designed the Team Ben architecture: three SDK-level actors (Ben, Coordinator, Sage) + custom workspace agents as a black box
+3. Built PipelineRunner — code-enforced DAG executor with typed phase gates, topological sort, parallel layers, retry support (`src/pipeline/`)
+4. Built Pulse Protocol — structured agent status updates with PulseCollector, user-relevant filtering, `setOnUserRelevantPulse` callback that wakes `squad_wait` (`src/pulse/`)
+5. Built Intent Graph — structured user intent representation with create/update/serialize (`src/intent/`)
+6. Built MCP tools: `squad_run`, `squad_wait`, `squad_ask`, `squad_respond`, `squad_pulse`, `squad_analyze_run` in `src/mcp/server.ts`
+7. Built built-in actors registry with 3-tier charter fallback (workspace file > SDK built-in > generic) in `src/agents/built-in-actors.ts` and `src/server/agent-lifecycle.ts`
+8. Built `squad_analyze_run` with `analyze-run.ts` for Sage's post-run analysis
+9. Registered `squad_pulse` as both MCP tool and SquadTool (so agents inside sessions can emit pulses)
+10. Wired PulseCollector's callback to trigger `squad_wait` resolvers — both MCP and SquadTool paths share the same collector
+11. Added Coordinator as SDK built-in LLM actor that reads routing.md + roster and returns JSON agent selection (replaces broken regex matching)
+12. Set up `.vscode/mcp.json` for local testing
+13. Created workspace agents: fenster (SDK Developer), hockney (SDK Reviewer), strausz (SDK Architect)
+14. Removed workspace-level Ben charter — now uses SDK built-in only
+15. Multiple successful end-to-end runs: Ben understood intent, dispatched to correct agents, agents implemented code, reviewer caught real issues, pipeline auto-transitioned between phases
+16. 42 unit tests across 4 test files all passing
+17. All changes committed to main branch
+
+### What the next session should do
+
+**Priority 1: Fix the pipeline Q&A loop (blocking)**
+The pipeline's `waitForResponse` polling grabs Ben's first reply (which is his clarifying questions) as the "response" and fails the gate. When Ben asks questions via `squad_pulse` and the user answers via `squad_respond`, the pipeline doesn't know to wait for Ben's post-clarification answer. Fix: make the understand phase wait for a response that comes AFTER any `squad_respond` calls, or have Ben's charter instruct him to NOT ask questions during understand phase (include all context upfront in `squad_run`), or rework `waitForResponse` to track the latest reply timestamp.
+
+**Priority 2: Verify Coordinator routing end-to-end**
+The Coordinator LLM actor is built and wired into the pipeline (understand → route → implement + review). It needs a clean test run on a fresh server to verify it picks the right agents. The dist is built and committed — just restart the MCP server and call `squad_run`.
+
+**Priority 3: Build `squad_cancel`**
+The team already spec'd this out (Ben produced a full spec in one of the runs). Implement: close all active sessions via session manager, return summary.
+
+**Priority 4: Run Sage end-to-end**
+Call `squad_analyze_run` after a completed run and verify it produces useful improvement proposals. Optionally dispatch to Sage as an agent to interpret the analysis.
+
+**Priority 5: Remaining items from "What's Incomplete" table above**
+
+### Key files to read first
+- `TEAM-BEN.md` — this file, the full spec
+- `packages/squad-sdk/src/mcp/server.ts` — the main `squad_run` implementation with pipeline, coordinator, and all MCP tools
+- `packages/squad-sdk/src/agents/built-in-actors.ts` — Ben, Coordinator, Sage embedded charters
+- `packages/squad-sdk/src/pipeline/runner.ts` — PipelineRunner DAG executor
+- `packages/squad-sdk/src/pulse/pulse.ts` — PulseCollector with callback
+- `.vscode/mcp.json` — MCP server config for local testing
+- `.squad/agents/` — workspace agents (fenster, hockney, strausz)
+- `.squad/routing.md` — routing rules the Coordinator reads
