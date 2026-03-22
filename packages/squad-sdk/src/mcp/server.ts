@@ -520,10 +520,11 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   let waitResolvers: Array<(value: string) => void> = [];
 
   pulseCollector.setOnUserRelevantPulse((pulse) => {
-    if (pulse.questionsForUser.length > 0) {
-      pendingUserQuestions.push(...pulse.questionsForUser);
+    const questions = pulse.questionsForUser ?? [];
+    if (questions.length > 0) {
+      pendingUserQuestions.push(...questions);
     }
-    const reason = pulse.questionsForUser.length > 0 ? 'question'
+    const reason = questions.length > 0 ? 'question'
       : pulse.phase === 'done' ? 'done'
       : pulse.status === 'error' ? 'error'
       : 'event';
