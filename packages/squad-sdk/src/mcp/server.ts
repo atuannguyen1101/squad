@@ -14,6 +14,7 @@ import { createPulse, formatPulseForUser, type PulsePhase, type PulseStatus } fr
 import { createEmptyIntentGraph, serializeIntentGraph, type IntentGraph } from '../intent/index.js';
 import { PipelineRunner, type PipelineDefinition, type PipelineRunnerDeps } from '../pipeline/index.js';
 import { analyzeRun, formatAnalysisReport, type SessionSnapshot } from './analyze-run.js';
+import { parseRoutingMarkdown, compileRoutingRules, matchRoute } from '../config/routing.js';
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -577,15 +578,40 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       } catch { /* no agents dir */ }
 
       const findByRole = (pattern: RegExp) => agents.find(a => pattern.test(a.role))?.name ?? null;
-      const architectName = findByRole(/architect|lead|design|plan/i);
-      const implementerName = findByRole(/dev|engineer|implement|core|runtime/i) ?? agents[0]?.name;
-      if (!implementerName) {
-        return {
-          content: [{ type: 'text', text: 'No agents found in .squad/agents/. Create at least one agent with a charter before running.' }],
-        };
+
+      let architectName: string | null = null;
+      let implementerName: string | undefined;
+      let reviewerName!: string;
+
+      const routingPath = path.join(options.squadRoot, '.squad', 'routing.md');
+      let routedViaCoordinator = false;
+      try {
+        const routingContent = fs.readFileSync(routingPath, 'utf-8');
+        const routingConfig = parseRoutingMarkdown(routingContent);
+        if (routingConfig.rules.length > 0) {
+          const compiled = compileRoutingRules(routingConfig);
+          const match = matchRoute(args.message + (contextAddendum || ''), compiled);
+          if (match.confidence !== 'low' && match.agents.length > 0) {
+            const cleanName = (n: string) => n.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
+            const matched = match.agents.map(cleanName);
+            implementerName = matched[0];
+            reviewerName = matched[1] ?? implementerName!;
+            routedViaCoordinator = true;
+          }
+        }
+      } catch { /* no routing.md or parse error */ }
+
+      if (!routedViaCoordinator) {
+        architectName = findByRole(/architect/i);
+        implementerName = findByRole(/SDK.*Dev|developer/i) ?? findByRole(/dev|engineer/i) ?? agents[0]?.name;
+        reviewerName = findByRole(/reviewer/i) ?? findByRole(/review|quality|standards/i) ?? agents[1]?.name ?? implementerName!;
       }
 
-      const reviewerName = findByRole(/review|quality|standards/i) ?? agents[1]?.name ?? implementerName;
+      if (!implementerName) {
+        return {
+          content: [{ type: 'text', text: 'No agents found. Create at least one agent with a charter in .squad/agents/ before running.' }],
+        };
+      }
 
       const waitForResponse = async (agentName: string, timeoutMs: number): Promise<string | null> => {
         const startCount = mgr.getMessages(agentName).filter((m: any) => m.role === 'assistant').length;
