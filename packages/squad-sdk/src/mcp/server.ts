@@ -630,7 +630,15 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       const pipelineDeps: PipelineRunnerDeps = {
         dispatch: async (agentName: string, task: string, context?: string) => {
           const result = await server.dispatch(agentName, task, context);
-          return { sessionId: result.sessionId, status: result.status, agentName: result.agentName };
+          // Grab the latest assistant reply captured by sendAndWait in dispatch
+          const msgs = mgr.getMessages(agentName);
+          const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
+          return {
+            sessionId: result.sessionId,
+            status: result.status,
+            agentName: result.agentName,
+            response: lastReply?.content ?? undefined,
+          };
         },
         waitForResponse,
         onPhaseStart: (phaseId: string, agent: string) => {

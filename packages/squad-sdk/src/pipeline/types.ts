@@ -52,7 +52,7 @@ export interface PipelineState {
 }
 
 export interface PipelineRunnerDeps {
-  dispatch: (agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string; agentName: string }>;
+  dispatch: (agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string; agentName: string; response?: string }>;
   waitForResponse: (agentName: string, timeoutMs: number) => Promise<string | null>;
   onPhaseStart?: (phaseId: string, agent: string) => void;
   onPhaseComplete?: (result: PhaseResult) => void;

@@ -334,11 +334,8 @@ export class AgentSessionManager {
       ? `${message}\n\n<context>\n${context}\n</context>`
       : message;
 
-    await session.sendMessage({ prompt });
-
     this.ceremonyEngine?.onActivity();
 
-    // Capture outbound message and update timestamp
     const entry = this.sessions.get(resolvedName);
     if (entry) {
       entry.lastActiveAt = new Date();
@@ -347,6 +344,26 @@ export class AgentSessionManager {
         content: prompt,
         timestamp: new Date().toISOString(),
       });
+    }
+
+    // Use sendAndWait to capture the assistant's response
+    if (session.sendAndWait) {
+      try {
+        const result = await session.sendAndWait({ prompt }, 300_000);
+        const content = typeof result === 'string' ? result
+          : result && typeof (result as any).text === 'string' ? (result as any).text
+          : result && (result as any).data?.content ? String((result as any).data.content)
+          : result && typeof (result as any).content === 'string' ? (result as any).content
+          : null;
+        if (content && entry) {
+          entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
+        }
+      } catch {
+        // Timeout or error — fall back to fire-and-forget
+        await session.sendMessage({ prompt });
+      }
+    } else {
+      await session.sendMessage({ prompt });
     }
 
     // Persist updated lastMessageAt
@@ -594,7 +611,9 @@ export class AgentSessionManager {
         const result = await entry.session.sendAndWait({ prompt: message }, 120_000);
         const content = typeof result === 'string' ? result
           : result && typeof (result as any).text === 'string' ? (result as any).text
-          : result ? JSON.stringify(result) : null;
+          : result && (result as any).data?.content ? String((result as any).data.content)
+          : result && typeof (result as any).content === 'string' ? (result as any).content
+          : null;
         if (content) {
           entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
         }

@@ -126,8 +126,8 @@ export class PipelineRunner {
           ? `${phase.task}\n\nYou may only use these tools: ${phase.allowedTools.join(', ')}${contextStr}`
           : `${phase.task}${contextStr}`;
 
-        await this.deps.dispatch(phase.agent, taskWithTools);
-        const response = await this.deps.waitForResponse(phase.agent, timeout);
+        const dispatchResult = await this.deps.dispatch(phase.agent, taskWithTools);
+        const response = dispatchResult.response ?? await this.deps.waitForResponse(phase.agent, timeout);
 
         const output = response ?? undefined;
         const gatePass = output != null && phase.gate.validate(output);
