@@ -64,6 +64,13 @@ export {
   type ParsedHistory,
 } from './history-shadow.js';
 
+// --- Cross-Session Learning Persistence ---
+export {
+  extractSessionLearnings,
+  type ExtractedLearning,
+  type ExtractionResult,
+} from './session-learnings.js';
+
 // --- M2-10 Agent Onboarding ---
 export {
   onboardAgent,
@@ -71,6 +78,18 @@ export {
   type OnboardOptions,
   type OnboardResult,
 } from './onboarding.js';
+
+// --- Learning Extraction & Persistence ---
+export {
+  extractLearnings,
+  type LearningExtraction,
+  type LearningExtractionOptions,
+} from './learning-extractor.js';
+
+export {
+  enableLearningPersistence,
+  type LearningPersistenceConfig,
+} from './learning-persistence.js';
 
 export {
   BUILT_IN_ACTORS,

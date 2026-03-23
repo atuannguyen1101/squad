@@ -17,6 +17,8 @@ import type { SquadSession, SquadSessionConfig, SquadTool, SquadMCPServerConfig 
 import type { EventBus } from '../runtime/event-bus.js';
 import { CharterCompiler, type AgentCharter } from '../agents/index.js';
 import { getBuiltInActor } from '../agents/built-in-actors.js';
+import { extractSessionLearnings } from '../agents/session-learnings.js';
+import { appendToHistory, createHistoryShadow, readHistory } from '../agents/history-shadow.js';
 import type { ServerPersistence, SessionRegistryEntry, ServerStateSnapshot } from './persistence.js';
 import { CeremonyTriggerEngine } from './ceremony-triggers.js';
 import type { CeremonyConfig } from '../config/schema.js';
@@ -500,16 +502,13 @@ export class AgentSessionManager {
     sections.push(charter.prompt);
     sections.push('');
 
-    // 3. Recent history (last ~2KB)
-    const historyContent = this.readFileSafe(
-      path.join(this.squadRoot, '.squad', 'agents', agentName, 'history.md'),
-    );
-    if (historyContent) {
-      const trimmed = historyContent.length > MAX_HISTORY_BYTES
-        ? '...\n' + historyContent.slice(-MAX_HISTORY_BYTES)
-        : historyContent;
+    // 3. Recent history — section-aware injection
+    //    Prioritize Learnings + Decisions (most actionable), then Patterns + Issues.
+    //    Skip raw Context section (already in charter) and References (low signal).
+    const historyInjection = this.buildHistoryInjection(agentName);
+    if (historyInjection) {
       sections.push('## Recent History\n');
-      sections.push(trimmed);
+      sections.push(historyInjection);
       sections.push('');
     }
 
@@ -588,10 +587,19 @@ export class AgentSessionManager {
 
   /**
    * Gracefully close a specific agent's session.
+   * Extracts learnings from the conversation and persists them to the
+   * agent's history shadow before destroying the session.
    */
   async closeSession(agentName: string): Promise<void> {
     const entry = this.sessions.get(agentName);
     if (!entry) return;
+
+    // Capture data BEFORE deletion for learning persistence
+    const capturedMessages = [...entry.messages];
+    const sessionDuration = Date.now() - entry.createdAt.getTime();
+
+    // Extract and persist learnings from this session (best-effort)
+    await this.persistSessionLearnings(agentName, capturedMessages);
 
     try {
       await entry.session.close();
@@ -614,7 +622,9 @@ export class AgentSessionManager {
       sessionId: entry.session.sessionId,
       agentName,
       payload: {
-        durationMs: Date.now() - entry.createdAt.getTime(),
+        durationMs: sessionDuration,
+        messages: capturedMessages,
+        messageCount: capturedMessages.length,
       },
       timestamp: new Date(),
     });
@@ -760,6 +770,87 @@ export class AgentSessionManager {
       }
     } catch {
       // Context windowing failure is non-fatal — continue with full history
+    }
+  }
+
+  /**
+   * Build a section-aware history injection for the system prompt.
+   *
+   * Prioritizes actionable sections (Learnings, Decisions) over contextual
+   * ones (Patterns, Issues). Respects MAX_HISTORY_BYTES budget. Returns
+   * null if no history exists or all sections are empty.
+   */
+  private buildHistoryInjection(agentName: string): string | null {
+    const historyContent = this.readFileSafe(
+      path.join(this.squadRoot, '.squad', 'agents', agentName, 'history.md'),
+    );
+    if (!historyContent) return null;
+
+    // Parse sections in priority order
+    const prioritySections = ['Learnings', 'Decisions', 'Patterns', 'Issues'] as const;
+    const extracted: string[] = [];
+    let totalLength = 0;
+
+    for (const sectionName of prioritySections) {
+      const sectionRegex = new RegExp(
+        `^##\\s+${sectionName}\\s*$([\\s\\S]*?)(?=^##\\s|$)`,
+        'm',
+      );
+      const match = historyContent.match(sectionRegex);
+      if (!match) continue;
+
+      const content = match[1]!.trim();
+      // Skip empty sections or placeholder comments
+      if (!content || /^<!--.*-->$/.test(content)) continue;
+
+      const sectionBlock = `### ${sectionName}\n\n${content}`;
+
+      // Respect budget — stop adding sections when we'd exceed the limit
+      if (totalLength + sectionBlock.length > MAX_HISTORY_BYTES) {
+        // Try to fit a truncated version
+        const remaining = MAX_HISTORY_BYTES - totalLength;
+        if (remaining > 100) {
+          extracted.push(`### ${sectionName}\n\n…${content.slice(-(remaining - 30))}`);
+        }
+        break;
+      }
+
+      extracted.push(sectionBlock);
+      totalLength += sectionBlock.length;
+    }
+
+    return extracted.length > 0 ? extracted.join('\n\n') : null;
+  }
+
+  /**
+   * Extract learnings from a session's messages and persist them to the
+   * agent's history shadow. Best-effort — failures are swallowed to avoid
+   * blocking session teardown.
+   */
+  private async persistSessionLearnings(
+    agentName: string,
+    messages: SessionMessage[],
+  ): Promise<void> {
+    try {
+      if (messages.length === 0) return;
+
+      const result = extractSessionLearnings(messages, agentName);
+      if (!result.hasContent) return;
+
+      // Ensure the history shadow exists
+      await createHistoryShadow(this.squadRoot, agentName);
+
+      // Append each extracted section
+      for (const learning of result.learnings) {
+        await appendToHistory(
+          this.squadRoot,
+          agentName,
+          learning.section,
+          learning.content,
+        );
+      }
+    } catch {
+      // Learning persistence is best-effort — never block session close
     }
   }
 

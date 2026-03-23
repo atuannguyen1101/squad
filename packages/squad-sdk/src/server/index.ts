@@ -26,6 +26,8 @@ import { ServerPersistence, type PersistenceConfig, type ServerStateSnapshot } f
 import { EventHistory, type HistoryEvent } from './event-history.js';
 import { PulseCollector, createPulse as createPulseFn, filterPulseForUser as filterPulseFn } from '../pulse/index.js';
 import { Scratchpad } from '../scratchpad/index.js';
+import { enableLearningPersistence } from '../agents/learning-persistence.js';
+import type { UnsubscribeFn } from '../runtime/event-bus.js';
 
 // ============================================================================
 // Types
@@ -83,6 +85,7 @@ export class SquadServer {
   private remoteBridge: RemoteBridge | null = null;
   private mcpBridge: McpBridge | null = null;
   private running = false;
+  private learningUnsubscribe: UnsubscribeFn | null = null;
 
   constructor(config: SquadServerConfig) {
     this.config = config;
@@ -277,6 +280,18 @@ export class SquadServer {
       await this.remoteBridge.start();
     }
 
+    // 5. Enable cross-session learning persistence
+    this.learningUnsubscribe = enableLearningPersistence(
+      this.eventBus,
+      this.pulseCollector,
+      {
+        enabled: true,
+        minMessages: 5,
+        maxSectionLength: 500,
+        squadRoot,
+      },
+    );
+
     this.running = true;
 
     // Start auto-save after all components are ready
@@ -320,6 +335,10 @@ export class SquadServer {
     }
 
     // 4. Clear event handlers and ephemeral state
+    if (this.learningUnsubscribe) {
+      this.learningUnsubscribe();
+      this.learningUnsubscribe = null;
+    }
     this.eventBus.clear();
     this.scratchpad.clear();
 
