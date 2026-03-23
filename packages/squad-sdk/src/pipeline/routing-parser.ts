@@ -2,11 +2,12 @@
  * Routing Parser — Parses Coordinator responses and generates implementation phases.
  *
  * Supports two formats:
- * 1. Single-agent: {"implementer": "name", "reviewer": "name", "architect": null}
- * 2. Multi-subtask: {"subtasks": [{"agent": "name", "task": "desc"}, ...], "reviewer": "name"}
+ * 1. Single-agent: {"implementer": "name", "reviewer": "name"} or {"implementer": "name", "reviewer": null}
+ * 2. Multi-subtask: {"subtasks": [{"agent": "name", "task": "desc"}, ...], "reviewer": "name"} or with reviewer: null
  *
+ * Reviewer is optional. When reviewer is null, only implementation phases are generated.
  * The multi-subtask format generates parallel implement phases (implement-0, implement-1, ...)
- * with no dependencies between them, plus a single review phase that depends on all of them.
+ * with no dependencies between them, plus an optional review phase if reviewer is present.
  */
 
 import type { PhaseDefinition } from './types.js';
@@ -19,8 +20,8 @@ export interface SubtaskEntry {
 }
 
 export type RoutingDecision =
-  | { kind: 'single'; implementer: string; reviewer: string }
-  | { kind: 'multi'; subtasks: SubtaskEntry[]; reviewer: string };
+  | { kind: 'single'; implementer: string; reviewer: string | null }
+  | { kind: 'multi'; subtasks: SubtaskEntry[]; reviewer: string | null };
 
 export interface PhaseGeneratorOptions {
   /** The original user message / task description */
@@ -46,15 +47,16 @@ export interface PhaseGeneratorOptions {
 /**
  * Validate whether a Coordinator response string is a valid routing decision.
  * Accepts both single-agent and multi-subtask formats.
+ * Reviewer is optional for simple tasks — implementer-only routing is valid.
  */
 export function isValidRoutingResponse(output: unknown): boolean {
   if (typeof output !== 'string') return false;
   try {
     const parsed = JSON.parse(output.match(/\{[\s\S]*\}/)?.[0] ?? '');
-    // Single-agent format
-    if (parsed.implementer && parsed.reviewer) return true;
-    // Multi-subtask format
-    if (Array.isArray(parsed.subtasks) && parsed.subtasks.length > 0 && parsed.reviewer) {
+    // Single-agent format: implementer required, reviewer optional
+    if (parsed.implementer) return true;
+    // Multi-subtask format: subtasks required, reviewer optional
+    if (Array.isArray(parsed.subtasks) && parsed.subtasks.length > 0) {
       return parsed.subtasks.every((s: Record<string, unknown>) => s.agent && s.task);
     }
     return false;
@@ -66,28 +68,29 @@ export function isValidRoutingResponse(output: unknown): boolean {
 /**
  * Parse a Coordinator response string into a typed RoutingDecision.
  * Returns null if the response is not valid.
+ * Reviewer is optional — if not present or null, no review phase will be generated.
  */
 export function parseRoutingDecision(output: string): RoutingDecision | null {
   try {
     const jsonStr = output.match(/\{[\s\S]*\}/)?.[0] ?? '';
     const parsed = JSON.parse(jsonStr);
 
-    if (Array.isArray(parsed.subtasks) && parsed.subtasks.length > 0 && parsed.reviewer) {
+    if (Array.isArray(parsed.subtasks) && parsed.subtasks.length > 0) {
       return {
         kind: 'multi',
         subtasks: parsed.subtasks.map((s: Record<string, unknown>) => ({
           agent: String(s.agent).toLowerCase(),
           task: String(s.task),
         })),
-        reviewer: String(parsed.reviewer).toLowerCase(),
+        reviewer: parsed.reviewer ? String(parsed.reviewer).toLowerCase() : null,
       };
     }
 
-    if (parsed.implementer && parsed.reviewer) {
+    if (parsed.implementer) {
       return {
         kind: 'single',
         implementer: String(parsed.implementer).toLowerCase(),
-        reviewer: String(parsed.reviewer).toLowerCase(),
+        reviewer: parsed.reviewer ? String(parsed.reviewer).toLowerCase() : null,
       };
     }
 
@@ -103,10 +106,12 @@ export function parseRoutingDecision(output: string): RoutingDecision | null {
  * Generate implementation + review phases from a routing decision.
  *
  * Single-agent decisions produce:
- *   implement → review
+ *   - implement only (if reviewer is null)
+ *   - implement → review (if reviewer is present)
  *
  * Multi-subtask decisions produce:
- *   implement-0, implement-1, ... (parallel) → review (depends on all)
+ *   - implement-0, implement-1, ... (parallel) only (if reviewer is null)
+ *   - implement-0, implement-1, ... (parallel) → review (if reviewer is present)
  */
 export function generateImplPhases(
   decision: RoutingDecision,
@@ -140,28 +145,31 @@ export function generateImplPhases(
       timeout,
     });
 
-    phases.push({
-      id: 'review',
-      agent: revName,
-      task: [
-        `Review the implementation for: ${opts.message}`,
-        '',
-        `Use squad_read_session to read ${implName}'s session and see what was built.`,
-        'Check: code quality, test coverage, pattern consistency, type safety.',
-        'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
-      ].join('\n'),
-      dependsOn: ['implement'],
-      gate: {
-        validate: (o: unknown) => {
-          if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 20) return true;
-          return opts.hasDonePulse(revName);
+    // Only add review phase if reviewer is present
+    if (revName) {
+      phases.push({
+        id: 'review',
+        agent: revName,
+        task: [
+          `Review the implementation for: ${opts.message}`,
+          '',
+          `Use squad_read_session to read ${implName}'s session and see what was built.`,
+          'Check: code quality, test coverage, pattern consistency, type safety.',
+          'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
+        ].join('\n'),
+        dependsOn: ['implement'],
+        gate: {
+          validate: (o: unknown) => {
+            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 20) return true;
+            return opts.hasDonePulse(revName);
+          },
+          description: 'Reviewer must produce a substantive review or emit a done pulse',
         },
-        description: 'Reviewer must produce a substantive review or emit a done pulse',
-      },
-      timeout,
-    });
+        timeout,
+      });
+    }
   } else {
-    // Multi-subtask: parallel implement phases + single review phase
+    // Multi-subtask: parallel implement phases + optional review phase
     const implementPhaseIds: string[] = [];
     const subtaskAgents: string[] = [];
 
@@ -199,37 +207,39 @@ export function generateImplPhases(
       });
     }
 
-    // Review phase depends on ALL implement phases
-    const sessionReadInstructions = subtaskAgents
-      .map(a => `- Use squad_read_session to read ${a}'s session`)
-      .join('\n');
-
+    // Only add review phase if reviewer is present
     const revName = decision.reviewer;
-    phases.push({
-      id: 'review',
-      agent: revName,
-      task: [
-        `Review the parallel implementation for: ${opts.message}`,
-        '',
-        `${subtaskAgents.length} agents worked in parallel on subtasks:`,
-        ...decision.subtasks.map(s => `- ${s.agent}: ${s.task}`),
-        '',
-        sessionReadInstructions,
-        '',
-        'Check: code quality, test coverage, pattern consistency, type safety.',
-        'IMPORTANT: Check for file conflicts between parallel agents — look for overlapping edits to the same files.',
-        'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
-      ].join('\n'),
-      dependsOn: implementPhaseIds,
-      gate: {
-        validate: (o: unknown) => {
-          if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 20) return true;
-          return opts.hasDonePulse(revName);
+    if (revName) {
+      const sessionReadInstructions = subtaskAgents
+        .map(a => `- Use squad_read_session to read ${a}'s session`)
+        .join('\n');
+
+      phases.push({
+        id: 'review',
+        agent: revName,
+        task: [
+          `Review the parallel implementation for: ${opts.message}`,
+          '',
+          `${subtaskAgents.length} agents worked in parallel on subtasks:`,
+          ...decision.subtasks.map(s => `- ${s.agent}: ${s.task}`),
+          '',
+          sessionReadInstructions,
+          '',
+          'Check: code quality, test coverage, pattern consistency, type safety.',
+          'IMPORTANT: Check for file conflicts between parallel agents — look for overlapping edits to the same files.',
+          'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
+        ].join('\n'),
+        dependsOn: implementPhaseIds,
+        gate: {
+          validate: (o: unknown) => {
+            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 20) return true;
+            return opts.hasDonePulse(revName);
+          },
+          description: 'Reviewer must produce a substantive review or emit a done pulse',
         },
-        description: 'Reviewer must produce a substantive review or emit a done pulse',
-      },
-      timeout,
-    });
+        timeout,
+      });
+    }
   }
 
   return phases;

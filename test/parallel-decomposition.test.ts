@@ -62,9 +62,14 @@ describe('isValidRoutingResponse', () => {
       expect(isValidRoutingResponse(input)).toBe(false);
     });
 
-    it('rejects missing reviewer', () => {
+    it('accepts single-agent without reviewer', () => {
       const input = '{"implementer": "fenster"}';
-      expect(isValidRoutingResponse(input)).toBe(false);
+      expect(isValidRoutingResponse(input)).toBe(true);
+    });
+
+    it('accepts single-agent with explicit null reviewer', () => {
+      const input = '{"implementer": "fenster", "reviewer": null}';
+      expect(isValidRoutingResponse(input)).toBe(true);
     });
   });
 
@@ -109,11 +114,11 @@ describe('isValidRoutingResponse', () => {
       expect(isValidRoutingResponse(input)).toBe(false);
     });
 
-    it('rejects subtasks without reviewer', () => {
+    it('accepts subtasks without reviewer', () => {
       const input = JSON.stringify({
         subtasks: [{ agent: 'fenster', task: 'thing' }],
       });
-      expect(isValidRoutingResponse(input)).toBe(false);
+      expect(isValidRoutingResponse(input)).toBe(true);
     });
   });
 
@@ -161,6 +166,26 @@ describe('parseRoutingDecision', () => {
         expect(result.reviewer).toBe('fido');
       }
     });
+
+    it('parses implementer-only routing (no reviewer field)', () => {
+      const input = '{"implementer": "fenster"}';
+      const result = parseRoutingDecision(input);
+      expect(result).toEqual({
+        kind: 'single',
+        implementer: 'fenster',
+        reviewer: null,
+      });
+    });
+
+    it('parses implementer-only routing (explicit null reviewer)', () => {
+      const input = '{"implementer": "fenster", "reviewer": null}';
+      const result = parseRoutingDecision(input);
+      expect(result).toEqual({
+        kind: 'single',
+        implementer: 'fenster',
+        reviewer: null,
+      });
+    });
   });
 
   describe('multi-subtask format', () => {
@@ -192,6 +217,24 @@ describe('parseRoutingDecision', () => {
       if (result?.kind === 'multi') {
         expect(result.subtasks[0]?.task).toBe('Build the AUTH Module');
       }
+    });
+
+    it('parses multi-subtask without reviewer', () => {
+      const input = JSON.stringify({
+        subtasks: [
+          { agent: 'fenster', task: 'Build auth module' },
+          { agent: 'eecom', task: 'Build logging' },
+        ],
+      });
+      const result = parseRoutingDecision(input);
+      expect(result).toEqual({
+        kind: 'multi',
+        subtasks: [
+          { agent: 'fenster', task: 'Build auth module' },
+          { agent: 'eecom', task: 'Build logging' },
+        ],
+        reviewer: null,
+      });
     });
 
     it('prefers multi-subtask format when both keys present', () => {
@@ -235,6 +278,18 @@ describe('generateImplPhases — single-agent', () => {
     const phases = generateImplPhases(singleDecision, makeOpts());
     expect(phases).toHaveLength(2);
     expect(phases.map(p => p.id)).toEqual(['implement', 'review']);
+  });
+
+  it('generates exactly 1 phase when reviewer is null (no review)', () => {
+    const noReviewDecision: RoutingDecision = {
+      kind: 'single',
+      implementer: 'fenster',
+      reviewer: null,
+    };
+    const phases = generateImplPhases(noReviewDecision, makeOpts());
+    expect(phases).toHaveLength(1);
+    expect(phases[0]?.id).toBe('implement');
+    expect(phases[0]?.agent).toBe('fenster');
   });
 
   it('implement phase has no dependsOn', () => {
@@ -317,6 +372,21 @@ describe('generateImplPhases — multi-subtask', () => {
   it('generates N+1 phases (N implement + 1 review)', () => {
     const phases = generateImplPhases(multiDecision, makeOpts());
     expect(phases).toHaveLength(3);
+  });
+
+  it('generates N phases when reviewer is null (no review)', () => {
+    const noReviewDecision: RoutingDecision = {
+      kind: 'multi',
+      subtasks: [
+        { agent: 'fenster', task: 'Build auth module' },
+        { agent: 'eecom', task: 'Build logging system' },
+      ],
+      reviewer: null,
+    };
+    const phases = generateImplPhases(noReviewDecision, makeOpts());
+    expect(phases).toHaveLength(2);
+    expect(phases.map(p => p.id)).toEqual(['implement-0', 'implement-1']);
+    expect(phases.every(p => p.dependsOn === undefined)).toBe(true);
   });
 
   it('implement phase IDs are implement-0, implement-1, ...', () => {

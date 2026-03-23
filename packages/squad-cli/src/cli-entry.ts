@@ -96,6 +96,7 @@ import { fatal, SquadError } from './cli/core/errors.js';
 import { BOLD, RESET, DIM, RED, GREEN, YELLOW } from './cli/core/output.js';
 import { runInit } from './cli/core/init.js';
 import { runCost } from './cli/commands/cost.js';
+import { runHire } from './cli/commands/hire.js';
 import { getPackageVersion } from './cli/core/version.js';
 
 // Lazy-load squad-sdk to avoid triggering @github/copilot-sdk import on Node 24+
@@ -343,17 +344,7 @@ async function main(): Promise<void> {
   }
 
   if (cmd === 'hire') {
-    const nameIdx = args.indexOf('--name');
-    const name = (nameIdx !== -1 && args[nameIdx + 1]) ? args[nameIdx + 1] : undefined;
-    const roleIdx = args.indexOf('--role');
-    const role = (roleIdx !== -1 && args[roleIdx + 1]) ? args[roleIdx + 1] : undefined;
-    console.log('👋 Squad hire — team creation wizard starting... (full implementation pending)');
-    if (name) {
-      console.log(`   Name: ${name}`);
-    }
-    if (role) {
-      console.log(`   Role: ${role}`);
-    }
+    await runHire(args);
     return;
   }
 

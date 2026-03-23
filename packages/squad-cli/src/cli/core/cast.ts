@@ -13,6 +13,7 @@ import {
 } from '@bradygaster/squad-sdk';
 import {
   CastingEngine,
+  loadUniversesFromDirectorySync,
   type CastMember as EngineCastMember,
   type AgentRole as EngineAgentRole,
 } from '@bradygaster/squad-sdk/casting';
@@ -235,14 +236,39 @@ function extractFromBlock(block: string): CastProposal | null {
  */
 export function augmentWithCastingEngine(proposal: CastProposal): CastProposal {
   const engine = new CastingEngine();
+  
+  // Load custom universes from .squad-templates/universes/ if directory exists
+  const templatesDir = join(process.cwd(), '.squad-templates', 'universes');
+  if (existsSync(templatesDir)) {
+    try {
+      const { universes } = loadUniversesFromDirectorySync(templatesDir);
+      for (const template of universes) {
+        engine.registerUniverse(template);
+      }
+    } catch (err) {
+      console.warn('[cast] Failed to load custom universes:', err);
+    }
+  }
+  
   const universeLower = proposal.universe.toLowerCase();
 
-  // Map universe name to engine universe ID
-  let universeId: 'usual-suspects' | 'oceans-eleven' | null = null;
+  // Map universe name to engine universe ID - check built-in and custom universes
+  let universeId: string | null = null;
   if (/usual\s*suspects/i.test(universeLower)) {
     universeId = 'usual-suspects';
   } else if (/ocean/i.test(universeLower)) {
     universeId = 'oceans-eleven';
+  } else {
+    // Check if the proposed universe name matches any loaded custom universe
+    const availableUniverses = engine.getUniverses();
+    const match = availableUniverses.find(id => 
+      id.toLowerCase() === universeLower || 
+      universeLower.includes(id.toLowerCase()) ||
+      id.toLowerCase().includes(universeLower)
+    );
+    if (match) {
+      universeId = match;
+    }
   }
 
   // If universe not recognized, return as-is (LLM's arbitrary names preserved)

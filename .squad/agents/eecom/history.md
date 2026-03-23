@@ -252,7 +252,9 @@ Bug: `tsc --incremental` will not emit newly added files if the `.tsbuildinfo` c
 
 **5. File creation workaround when tools are disabled: use squad MCP agents**
 When a session context has file-creation tools disabled (e.g., sandbox restrictions or tool policy), the workaround is to delegate file creation to squad MCP agents  they run in their own process context with their own tool grants. Pattern: coordinator detects tool restriction  routes file-write task to an MCP-capable squad agent via `squad_route`  agent creates the file and signals completion. Never block on "tools unavailable"  route around it.
+### 2026-03-23
 
+- **Line count:** 30 files with changes. **First 30 lines (all changes):**
 ## Decisions
 ### 2026-03-23
 

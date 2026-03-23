@@ -30,6 +30,22 @@
 3. **Copilot API platform** (upstream) — source of transient errors and rate limits
 
 Squad operates at layer #1, so issues at layers #2-3 are outside our control.
+### 2026-03-23T21:14:25.084Z
+## 2026-03-23: Missing Pulse Protocol
+
+Run 2026-03-23T21:12:39 — I processed 22 messages and completed my work, but I emitted zero pulses. This violated the observability contract and made my work invisible to the coordinator and other agents.
+
+**Root cause:** Either (1) my charter lacks explicit squad_pulse instructions, or (2) the work was misrouted to me (not my domain).
+
+**Action needed:** Audit my charter for pulse examples. If missing, add explicit instructions:
+```
+squad_pulse(agent="capcom", phase="implementing", status="ok", progressPct=X, summary="Current status", nextStep="Next action")
+```
+
+Call squad_pulse at every phase transition: starting (0%), implementing (10-90%), testing (90%), blocked (any%), done (100%).
+
+**Learning:** Silent work is invisible work. Pulses are not optional — they're the interface contract between me and the orchestration layer.
+
 ## Core Context
 
 - **Project:** Squad — AI agent orchestration framework
