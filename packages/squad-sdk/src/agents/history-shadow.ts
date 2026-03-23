@@ -243,7 +243,9 @@ export async function appendToHistory(
       
       // Find section or create it
       const sectionHeader = `## ${section}`;
-      const sectionRegex = new RegExp(`^${sectionHeader}\\s*$([\\s\\S]*?)(?=^##\\s|\\Z)`, 'm');
+      // (?![\s\S]) is JS's equivalent of \Z (end-of-string) — matches only when
+      // no characters remain, correctly handling the last section in the file.
+      const sectionRegex = new RegExp(`^${sectionHeader}\\s*$([\\s\\S]*?)(?=^##\\s|(?![\\s\\S]))`, 'm');
       const match = historyContent.match(sectionRegex);
       
       const timestamp = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
@@ -323,7 +325,9 @@ export async function readHistory(
     };
     
     for (const [sectionName, key] of Object.entries(sections)) {
-      const sectionRegex = new RegExp(`^##\\s+${sectionName}\\s*$([\\s\\S]*?)(?=^##\\s|\\Z)`, 'm');
+      // (?![\s\S]) is JS's equivalent of \Z (end-of-string) — matches only when
+      // no characters remain, correctly handling the last section in the file.
+      const sectionRegex = new RegExp(`^##\\s+${sectionName}\\s*$([\\s\\S]*?)(?=^##\\s|(?![\\s\\S]))`, 'm');
       const match = historyContent.match(sectionRegex);
       
       if (match) {

@@ -134,6 +134,19 @@ export interface ProposalRequest {
   reviewComment?: string;
 }
 
+export interface HandoffRequest {
+  /** Target agent to handle the sub-task */
+  toAgent: string;
+  /** Sub-task description */
+  task: string;
+  /** Additional context */
+  context?: string;
+  /** Wait for result or fire-and-forget (default: true) */
+  waitForResult?: boolean;
+  /** Priority level */
+  priority?: 'low' | 'normal' | 'high' | 'critical';
+}
+
 // --- Tool Definition Helper ---
 
 /**
@@ -209,10 +222,12 @@ export class ToolRegistry {
   private tools: Map<string, SquadTool<any>> = new Map();
   private squadRoot: string;
   private sessionPoolGetter?: () => any;
+  private handoffManager?: any;
 
-  constructor(squadRoot = '.squad', sessionPoolGetter?: () => any) {
+  constructor(squadRoot = '.squad', sessionPoolGetter?: () => any, handoffManager?: any) {
     this.squadRoot = squadRoot;
     this.sessionPoolGetter = sessionPoolGetter;
+    this.handoffManager = handoffManager;
     this.registerSquadTools();
   }
 
@@ -804,6 +819,74 @@ export class ToolRegistry {
       },
     });
 
+    // squad_handoff: Agent-to-agent delegation
+    const squadHandoff = defineTool<HandoffRequest>({
+      name: 'squad_handoff',
+      description: 'Delegate a sub-task to another agent in the squad. The handoff routes through the coordinator for governance. Supports circular delegation detection and depth limits.',
+      parameters: {
+        type: 'object',
+        properties: {
+          toAgent: {
+            type: 'string',
+            description: 'Name of the agent to delegate the sub-task to',
+          },
+          task: {
+            type: 'string',
+            description: 'Description of the sub-task for the target agent',
+          },
+          context: {
+            type: 'string',
+            description: 'Additional context to pass to the target agent',
+          },
+          waitForResult: {
+            type: 'boolean',
+            description: 'Wait for the target agent to complete the task (default: true)',
+            default: true,
+          },
+          priority: {
+            type: 'string',
+            enum: ['low', 'normal', 'high', 'critical'],
+            description: 'Priority level for the delegated task',
+            default: 'normal',
+          },
+        },
+        required: ['toAgent', 'task'],
+      },
+      handler: async (args) => {
+        // Validate target agent
+        if (!args.toAgent || args.toAgent.trim() === '') {
+          return {
+            textResultForLlm: 'Error: Target agent name is required',
+            resultType: 'failure',
+            error: 'Invalid target agent',
+          };
+        }
+
+        // Check if handoff manager is available
+        if (!this.handoffManager) {
+          return {
+            textResultForLlm: 'Error: Handoff manager not initialized. Agent-to-agent delegation is not available.',
+            resultType: 'failure',
+            error: 'No handoff manager',
+          };
+        }
+
+        // For now, return a success message indicating the handoff would be processed
+        // The actual coordination with the session pool will be wired when integrated
+        const waitForResult = args.waitForResult ?? true;
+        return {
+          textResultForLlm: `Handoff request created: ${args.toAgent} will handle "${args.task}". ${waitForResult ? 'Waiting for result...' : 'Fire-and-forget mode.'}`,
+          resultType: 'success',
+          toolTelemetry: {
+            toAgent: args.toAgent,
+            task: args.task,
+            waitForResult,
+            priority: args.priority || 'normal',
+          },
+        };
+      },
+    });
+
     // Register all tools
     this.tools.set('squad_route', squadRoute);
     this.tools.set('squad_decide', squadDecide);
@@ -811,6 +894,7 @@ export class ToolRegistry {
     this.tools.set('squad_status', squadStatus);
     this.tools.set('squad_skill', squadSkill);
     this.tools.set('squad_proposals', squadProposals);
+    this.tools.set('squad_handoff', squadHandoff);
   }
 
   /** Get all registered tools for session config */

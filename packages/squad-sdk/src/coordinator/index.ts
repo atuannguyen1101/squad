@@ -41,6 +41,15 @@ export {
   type ModelTierSuggestion,
 } from './response-tiers.js';
 
+// --- Agent-to-Agent Handoff ---
+export {
+  HandoffManager,
+  type HandoffRequest,
+  type HandoffResult,
+  type HandoffChainNode,
+  type HandoffConfig,
+} from './handoff.js';
+
 // --- Legacy types (kept for backwards compat) ---
 
 import type { SquadClient, SquadSessionConfig } from '../client/index.js';

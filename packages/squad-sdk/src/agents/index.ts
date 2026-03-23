@@ -63,6 +63,14 @@ export {
   type ParsedHistory,
 } from './history-shadow.js';
 
+// --- Intent Graph Lifecycle ---
+export {
+  buildSystemPrompt,
+  createSystemPromptWithConfig,
+  type SystemPromptOptions,
+  type SquadConfig,
+} from './agent-lifecycle.js';
+
 // --- M2-10 Agent Onboarding ---
 export {
   onboardAgent,
@@ -78,6 +86,23 @@ export {
   type PersonalAgentMeta,
   type PersonalAgentManifest,
 } from './personal.js';
+
+// --- M4-12 Learning Persistence ---
+export {
+  enableLearningPersistence,
+  type LearningPersistenceConfig,
+  type PulseCollector,
+  type SessionDestroyedEvent,
+} from './learning-persistence.js';
+
+// --- M4-12 Learning Extractor (exported for testing and direct use) ---
+export {
+  extractLearnings,
+  type SessionMessage,
+  type Pulse,
+  type LearningExtraction,
+  type LearningExtractionOptions,
+} from './learning-extractor.js';
 
 // --- Charter Types ---
 

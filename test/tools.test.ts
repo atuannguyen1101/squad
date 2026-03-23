@@ -79,9 +79,9 @@ describe('ToolRegistry', () => {
   });
 
   describe('registration', () => {
-    it('should register all six squad tools', () => {
+    it('should register all seven squad tools', () => {
       const tools = registry.getTools();
-      expect(tools.length).toBe(6);
+      expect(tools.length).toBe(7);
 
       const toolNames = tools.map(t => t.name);
       expect(toolNames).toContain('squad_route');
@@ -90,6 +90,7 @@ describe('ToolRegistry', () => {
       expect(toolNames).toContain('squad_status');
       expect(toolNames).toContain('squad_skill');
       expect(toolNames).toContain('squad_proposals');
+      expect(toolNames).toContain('squad_handoff');
     });
 
     it('should register tools with descriptions and parameters', () => {
@@ -105,7 +106,7 @@ describe('ToolRegistry', () => {
     it('should return all registered tools', () => {
       const tools = registry.getTools();
       expect(Array.isArray(tools)).toBe(true);
-      expect(tools.length).toBe(6);
+      expect(tools.length).toBe(7);
     });
 
     it('should return tools with handler functions', () => {
@@ -119,7 +120,7 @@ describe('ToolRegistry', () => {
   describe('getToolsForAgent', () => {
     it('should return all tools when no filter provided', () => {
       const tools = registry.getToolsForAgent();
-      expect(tools.length).toBe(6);
+      expect(tools.length).toBe(7); // squad_route, squad_decide, squad_memory, squad_status, squad_skill, squad_proposals, squad_handoff
     });
 
     it('should filter tools by allowed list', () => {

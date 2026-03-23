@@ -20,6 +20,16 @@ export * from './casting/index.js';
 export * from './skills/index.js';
 export { selectResponseTier, getTier } from './coordinator/response-tiers.js';
 export type { ResponseTier, TierName, TierContext, ModelTierSuggestion } from './coordinator/response-tiers.js';
+export { HandoffManager } from './coordinator/handoff.js';
+export type { HandoffRequest, HandoffResult, HandoffChainNode, HandoffConfig } from './coordinator/handoff.js';
+export { MetricsTracker } from './coordinator/metrics.js';
+export type { AgentMetrics, TaskOutcome, MetricsSnapshot } from './coordinator/metrics.js';
+export { RouteScorer } from './coordinator/route-scorer.js';
+export type { ScoredRoute, RouteScoreConfig } from './coordinator/route-scorer.js';
+export { EscalationManager } from './coordinator/escalation.js';
+export type { EscalationLevel, EscalationConfig, EscalationContext, EscalationState, EscalationEvent } from './coordinator/escalation.js';
+export { createMetricsTool } from './tools/metrics-tool.js';
+export type { MetricsQuery } from './tools/metrics-tool.js';
 export { loadConfig, loadConfigSync } from './runtime/config.js';
 export type { ConfigLoadResult, ConfigValidationError } from './runtime/config.js';
 export { MODELS, TIMEOUTS, AGENT_ROLES } from './runtime/constants.js';
@@ -158,3 +168,20 @@ export {
   createIdleRetrospective,
   validateCeremonyConfig,
 } from './server/ceremonies/retrospective.js';
+
+// Intent Graph (Sprint 3, Item #14)
+export {
+  IntentGraph,
+  IntentSummarizer,
+  type IntentNode,
+  type IntentEdge,
+  type IntentGraphData,
+  type IntentSummary,
+} from './intent/index.js';
+
+export {
+  buildSystemPrompt,
+  createSystemPromptWithConfig,
+  type SystemPromptOptions,
+  type SquadConfig,
+} from './agents/agent-lifecycle.js';

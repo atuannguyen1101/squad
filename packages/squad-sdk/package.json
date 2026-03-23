@@ -1,6 +1,6 @@
 {
   "name": "@bradygaster/squad-sdk",
-  "version": "0.8.25-build.14",
+  "version": "0.8.25-build.18",
   "description": "Squad SDK — Programmable multi-agent runtime for GitHub Copilot",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,6 +22,10 @@
       "types": "./dist/config/index.d.ts",
       "import": "./dist/config/index.js"
     },
+    "./config/routing": {
+      "types": "./dist/config/routing.d.ts",
+      "import": "./dist/config/routing.js"
+    },
     "./config/agent-source": {
       "types": "./dist/config/agent-source.d.ts",
       "import": "./dist/config/agent-source.js"
@@ -38,6 +42,10 @@
       "types": "./dist/agents/personal.d.ts",
       "import": "./dist/agents/personal.js"
     },
+    "./intent": {
+      "types": "./dist/intent/index.d.ts",
+      "import": "./dist/intent/index.js"
+    },
     "./adapter": {
       "types": "./dist/adapter/types.d.ts",
       "import": "./dist/adapter/types.js"
@@ -50,6 +58,18 @@
       "types": "./dist/coordinator/index.d.ts",
       "import": "./dist/coordinator/index.js"
     },
+    "./coordinator/metrics": {
+      "types": "./dist/coordinator/metrics.d.ts",
+      "import": "./dist/coordinator/metrics.js"
+    },
+    "./coordinator/route-scorer": {
+      "types": "./dist/coordinator/route-scorer.d.ts",
+      "import": "./dist/coordinator/route-scorer.js"
+    },
+    "./coordinator/escalation": {
+      "types": "./dist/coordinator/escalation.d.ts",
+      "import": "./dist/coordinator/escalation.js"
+    },
     "./hooks": {
       "types": "./dist/hooks/index.d.ts",
       "import": "./dist/hooks/index.js"
@@ -57,6 +77,10 @@
     "./tools": {
       "types": "./dist/tools/index.d.ts",
       "import": "./dist/tools/index.js"
+    },
+    "./tools/metrics-tool": {
+      "types": "./dist/tools/metrics-tool.d.ts",
+      "import": "./dist/tools/metrics-tool.js"
     },
     "./runtime": {
       "types": "./dist/runtime/config.d.ts",
@@ -206,7 +230,9 @@
   ],
   "scripts": {
     "prepublishOnly": "npm run build",
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "engines": {
     "node": ">=22.5.0"
@@ -230,7 +256,8 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.13",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^2.0.0"
   },
   "keywords": [
     "copilot",
