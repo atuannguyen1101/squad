@@ -1,6 +1,6 @@
 {
   "name": "@bradygaster/squad-sdk",
-  "version": "0.8.25-build.23",
+  "version": "0.9.1",
   "description": "Squad SDK — Programmable multi-agent runtime for GitHub Copilot",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,6 +22,10 @@
       "types": "./dist/config/index.d.ts",
       "import": "./dist/config/index.js"
     },
+    "./config/agent-source": {
+      "types": "./dist/config/agent-source.d.ts",
+      "import": "./dist/config/agent-source.js"
+    },
     "./skills": {
       "types": "./dist/skills/index.d.ts",
       "import": "./dist/skills/index.js"
@@ -29,6 +33,10 @@
     "./agents": {
       "types": "./dist/agents/index.d.ts",
       "import": "./dist/agents/index.js"
+    },
+    "./agents/personal": {
+      "types": "./dist/agents/personal.d.ts",
+      "import": "./dist/agents/personal.js"
     },
     "./adapter": {
       "types": "./dist/adapter/types.d.ts",
@@ -77,6 +85,14 @@
     "./ralph/triage": {
       "types": "./dist/ralph/triage.d.ts",
       "import": "./dist/ralph/triage.js"
+    },
+    "./ralph/capabilities": {
+      "types": "./dist/ralph/capabilities.d.ts",
+      "import": "./dist/ralph/capabilities.js"
+    },
+    "./ralph/rate-limiting": {
+      "types": "./dist/ralph/rate-limiting.d.ts",
+      "import": "./dist/ralph/rate-limiting.js"
     },
     "./casting": {
       "types": "./dist/casting/index.d.ts",
@@ -146,6 +162,10 @@
       "types": "./dist/runtime/event-bus-ws-bridge.d.ts",
       "import": "./dist/runtime/event-bus-ws-bridge.js"
     },
+    "./runtime/scheduler": {
+      "types": "./dist/runtime/scheduler.d.ts",
+      "import": "./dist/runtime/scheduler.js"
+    },
     "./runtime/constants": {
       "types": "./dist/runtime/constants.d.ts",
       "import": "./dist/runtime/constants.js"
@@ -154,33 +174,17 @@
       "types": "./dist/builders/index.d.ts",
       "import": "./dist/builders/index.js"
     },
-    "./server": {
-      "types": "./dist/server/index.d.ts",
-      "import": "./dist/server/index.js"
+    "./runtime/cross-squad": {
+      "types": "./dist/runtime/cross-squad.d.ts",
+      "import": "./dist/runtime/cross-squad.js"
     },
-    "./mcp": {
-      "types": "./dist/mcp/index.d.ts",
-      "import": "./dist/mcp/index.js"
+    "./runtime/otel-init": {
+      "types": "./dist/runtime/otel-init.d.ts",
+      "import": "./dist/runtime/otel-init.js"
     },
-    "./pipeline": {
-      "types": "./dist/pipeline/index.d.ts",
-      "import": "./dist/pipeline/index.js"
-    },
-    "./intent": {
-      "types": "./dist/intent/index.d.ts",
-      "import": "./dist/intent/index.js"
-    },
-    "./pulse": {
-      "types": "./dist/pulse/index.d.ts",
-      "import": "./dist/pulse/index.js"
-    },
-    "./context": {
-      "types": "./dist/context/index.d.ts",
-      "import": "./dist/context/index.js"
-    },
-    "./scratchpad": {
-      "types": "./dist/scratchpad/index.d.ts",
-      "import": "./dist/scratchpad/index.js"
+    "./config/models": {
+      "types": "./dist/config/models.d.ts",
+      "import": "./dist/config/models.js"
     }
   },
   "files": [
@@ -189,16 +193,14 @@
     "README.md"
   ],
   "scripts": {
-    "prepare": "npm run build",
     "prepublishOnly": "npm run build",
     "build": "tsc -p tsconfig.json"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5.0"
   },
   "dependencies": {
     "@github/copilot-sdk": "^0.1.32",
-    "@modelcontextprotocol/sdk": "^1.27.1",
     "vscode-jsonrpc": "^8.2.1"
   },
   "optionalDependencies": {

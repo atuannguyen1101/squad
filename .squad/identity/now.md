@@ -1,11 +1,11 @@
 ---
-updated_at: 2026-03-11T01:35:00Z
-focus_area: SDK Init Shore-Up (PRD in progress)
+updated_at: 2026-03-22T06:50:31Z
+focus_area: PR Pipeline Cleared, Next-Up Issues Ready
 version: v0.8.24
 branch: main
-tests_passing: 3931
-tests_todo: 46
-tests_skipped: 5
+tests_passing: 4655+
+tests_todo: ~20
+tests_skipped: ~5
 test_files: 149
 team_size: 19 active agents + Scribe + Ralph + @copilot
 team_identity: Apollo 13 / NASA Mission Control
@@ -14,40 +14,69 @@ process: All work through PRs. Branch naming squad/{issue-number}-{slug}. Never 
 
 # What We're Focused On
 
-**Status:** SDK Init Shore-Up initiative. Unified PRD drafted consolidating 6 SDK-related issues (#337-#342) into a 3-phase plan. Technical analysis and implementation roadmap complete. Awaiting Brady's decisions on open questions before Phase 1 kickoff.
+**Status:** PR pipeline cleared. 8 PRs reviewed, rebased, and merged. 6 issues triaged. 10 issues labeled `next-up` for immediate pickup. 1 new issue filed (#488 — GitHub auth documentation). Team ready to work through priority issues.
 
-## Current Initiative: SDK Init Shore-Up
+## Session Recap: PR Pipeline & Issue Triage (2026-03-22)
 
-**PRD:** `.squad/identity/prd-sdk-init-shoreup.md`
-**Technical Analysis:** `.squad/identity/sdk-init-technical-analysis.md`
-**Implementation Roadmap:** `.squad/identity/sdk-init-implementation-roadmap.md`
+**Agents Deployed:** Flight (Lead), EECOM (Core Dev), GNC (Node.js Runtime), PAO (DevRel), Coordinator
 
-### Phase 1: Fix the Gaps (P1, Small scope)
-- #337 — Config ↔ team.md sync broken → EECOM + CAPCOM
-- #338 — Ralph missing from generated config → EECOM + CAPCOM
-- #339 — @copilot routing without roster entry → EECOM + CAPCOM
+### PRs Merged (8 total)
 
-### Phase 2: Wire CastingEngine (P1, Medium scope)
-- #342 — CLI casting bypasses CastingEngine → EECOM + Procedures
+| PR | Title | Agent | Status |
+|---|---|---|---|
+| #483 | az CLI timeout fix | EECOM | ✅ Merged |
+| #480 | history race fix (async mutex + 14 tests) | EECOM | ✅ Merged |
+| #486 | SIGINT handling (two-layer cleanup + 22 tests) | EECOM | ✅ Merged |
+| #474 | Node 22 ESM fix + exports key alignment | GNC | ✅ Merged |
+| #487 | CLI docs expansion + broken link fixes | PAO | ✅ Merged |
+| #482 | Pagefind search integration | PAO | ✅ Merged |
+| #484 | Sample README templates | PAO | ✅ Merged |
+| #473 | Gap analysis | Flight | ✅ Merged |
 
-### Phase 3: Exercise Test Matrix (P2, Large scope)
-- #340 — 29 features need active exercise testing → FIDO + CAPCOM
-- #341 — Full test results (32/50 verified) → FIDO + CAPCOM
+### Issues Triaged & Labeled (6 total)
 
-### Open Design Questions
-1. AST vs regex for squad.config.ts mutations
-2. CastingEngine: augment LLM proposals (recommended) or replace entirely?
-3. Ralph charter: create one, or document as "built-in, no charter"?
+**Issues:** #485, #481, #479, #478, #477, #476  
+**Assignments:** Distributed across EECOM, CONTROL, RETRO, VOX, FIDO, HANDBOOK, PAO  
+**Status:** All labeled with squad/team ownership
+
+### Next-Up Label (10 issues)
+
+**Label:** `next-up`  
+**Type:** Bugs, easy wins, documentation improvements  
+**Status:** Ready for team pickup next sprint
+
+### New Issue: #488
+
+**Title:** docs: GitHub auth  
+**Type:** Documentation  
+**Owner:** PAO  
+**Status:** Created and assigned
+
+## Key Patterns Identified
+
+1. **CLI Timeouts** — External CLI calls need explicit timeouts + fallback logic
+2. **File Race Conditions** — History operations require async mutex + atomic writes + comprehensive tests (14 tests validated #480)
+3. **Signal Handling** — SIGINT cleanup needs two-layer approach: parent process handler + child process cleanup (22 tests validated #486)
+4. **ESM Exports** — Node 22 requires explicit exports map + validation that declared paths exist (PR #474 fixed mismatch)
+5. **Documentation Links** — Automated link validation should be CI gate to prevent broken references
+
+## Test Coverage Update
+
+- **New tests:** 36 from EECOM (14 race + 22 signal), GNC ESM validation
+- **Total passing:** 4655+ (per GNC report)
+- **Coverage areas:** Concurrent operations, signal handling, ESM compatibility, timeout scenarios
 
 ## 🚨 Next Session: Start Here
 
-**Pick up the SDK Init PRDs.** The unified PRD at `.squad/identity/prd-sdk-init-shoreup.md` is ready for implementation. This is up for grabs — the team's next priority.
+**PR pipeline cleared. Work through `next-up` issues.**
 
-Before starting:
-1. Fix EMU auth: `gh auth logout --user bradyg_microsoft`
-2. Apply triage labels to the 10 unlabeled issues
-3. Get Brady's decisions on open design questions (AST vs regex, CastingEngine approach, Ralph charter)
-4. Kick off Phase 1 implementation
+Priorities:
+1. **#488** — PAO: GitHub auth documentation (new)
+2. **#481** — EECOM + CONTROL: StorageProvider PRD (architectural)
+3. **#479** — EECOM + RETRO: history-shadow race fix (production bug mitigation)
+4. **#478** — VOX + PAO: Polish REPL (UX readiness)
+5. **#477** — FIDO: Code quality linting PRD (ESLint 9)
+6. **#476** — HANDBOOK + PAO: Guide v0.4.1 update (high community value)
 
 ## Current State
 
@@ -55,9 +84,9 @@ Before starting:
 - **Packages:** @bradygaster/squad-sdk, @bradygaster/squad-cli
 - **Branch:** main
 - **Build:** ✅ clean (0 errors)
-- **Tests:** 3,931 passed, 46 todo, 5 skipped, 149 test files (~89s)
+- **Tests:** 4,655+ passed, ~20 todo, ~5 skipped, 149 test files
 
-**Open Issues:** 30 total. 10 newly triaged this session (labels blocked by EMU auth — need `gh auth logout --user bradyg_microsoft`).
+**Open Issues:** 30 total. 6 triaged today + 10 labeled next-up for immediate work.
 
 ## Process
 

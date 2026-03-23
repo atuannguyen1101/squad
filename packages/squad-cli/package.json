@@ -1,6 +1,6 @@
 {
   "name": "@bradygaster/squad-cli",
-  "version": "0.8.25-build.23",
+  "version": "0.9.1",
   "description": "Squad CLI — Command-line interface for the Squad multi-agent runtime",
   "type": "module",
   "bin": {
@@ -72,6 +72,10 @@
       "types": "./dist/cli/shell/shell-metrics.d.ts",
       "import": "./dist/cli/shell/shell-metrics.js"
     },
+    "./core/detect-squad-dir": {
+      "types": "./dist/cli/core/detect-squad-dir.d.ts",
+      "import": "./dist/cli/core/detect-squad-dir.js"
+    },
     "./core/init": {
       "types": "./dist/cli/core/init.d.ts",
       "import": "./dist/cli/core/init.js"
@@ -99,14 +103,6 @@
     "./commands/doctor": {
       "types": "./dist/cli/commands/doctor.d.ts",
       "import": "./dist/cli/commands/doctor.js"
-    },
-    "./commands/hello": {
-      "types": "./dist/cli/commands/hello.d.ts",
-      "import": "./dist/cli/commands/hello.js"
-    },
-    "./commands/greet": {
-      "types": "./dist/cli/commands/greet.d.ts",
-      "import": "./dist/cli/commands/greet.js"
     },
     "./commands/aspire": {
       "types": "./dist/cli/commands/aspire.d.ts",
@@ -144,9 +140,21 @@
       "types": "./dist/cli/commands/copilot.d.ts",
       "import": "./dist/cli/commands/copilot.js"
     },
+    "./commands/cost": {
+      "types": "./dist/cli/commands/cost.d.ts",
+      "import": "./dist/cli/commands/cost.js"
+    },
     "./commands/copilot-bridge": {
       "types": "./dist/cli/commands/copilot-bridge.d.ts",
       "import": "./dist/cli/commands/copilot-bridge.js"
+    },
+    "./commands/personal": {
+      "types": "./dist/cli/commands/personal.d.ts",
+      "import": "./dist/cli/commands/personal.js"
+    },
+    "./commands/cast": {
+      "types": "./dist/cli/commands/cast.d.ts",
+      "import": "./dist/cli/commands/cast.js"
     }
   },
   "files": [
@@ -159,13 +167,13 @@
     "postinstall": "node scripts/patch-esm-imports.mjs && node scripts/patch-ink-rendering.mjs",
     "prepublishOnly": "npm run build",
     "build": "tsc -p tsconfig.json && npm run postbuild",
-    "postbuild": "node -e \"require('fs').cpSync('src/remote-ui', 'dist/remote-ui', {recursive: true})\" && node -e \"require('fs').cpSync('src/dashboard', 'dist/dashboard', {recursive: true})\""
+    "postbuild": "node -e \"require('fs').cpSync('src/remote-ui', 'dist/remote-ui', {recursive: true})\""
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5.0"
   },
   "dependencies": {
-    "@bradygaster/squad-sdk": "0.8.25",
+    "@bradygaster/squad-sdk": ">=0.9.0",
     "ink": "^6.8.0",
     "react": "^19.2.4",
     "vscode-jsonrpc": "^8.2.1"

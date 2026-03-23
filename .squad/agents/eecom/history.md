@@ -4,6 +4,26 @@
 
 ## Learnings
 
+### `squad version` subcommand (2026-07-15)
+
+**Context:** Running `squad version` returned "Unknown command: version" because the subcommand was never routed in `cli-entry.ts`, even though `--version` and `-v` flags worked fine. Classic "unwired command" bug class, but for a flag-to-subcommand gap rather than a missing import.
+
+**Fix:** Added `cmd === 'version'` to the existing `--version`/`-v` condition in `cli-entry.ts` (line ~130). Also added `version` to the help text command list. No new file in `cli/commands/` needed — this is a trivial inline handler, same as `--version`. The wiring test is unaffected since there's no separate command file.
+
+**Pattern:** When a CLI flag (`--foo`) works but the equivalent subcommand (`foo`) doesn't, the fix is almost always a single condition addition in `cli-entry.ts`. No separate command file needed for trivial handlers.
+
+### Privacy scrub messaging + EPERM + gitignore parent coverage (#549) (2026-07-14)
+
+**Context:** Upgrade footer message always said "Preserves user state" even when the email privacy scrub had run — a direct contradiction of what just happened. Two related issues in the same function: EPERM on read-only `.gitattributes` would crash the upgrade, and `.gitignore` would add redundant entries already covered by parent paths (e.g. `.squad/log/` when `.squad/` was already present).
+
+**Fix:**
+1. `upgrade.ts` — `ensureGitattributes` catches EPERM/EACCES and returns `[]` with a console.warn, graceful degradation.
+2. `upgrade.ts` — `ensureGitignore` skips an entry when any existing line is a parent prefix of it.
+3. `upgrade.ts` — Footer logic checks whether the email scrub actually ran; shows "Privacy scrub applied" or "Preserves user state" accordingly.
+4. `test/cli/upgrade.test.ts` — Added EPERM test using `chmodSync` (fix: `chmodSync` was missing from the `fs` import — added it).
+
+**Pattern:** When adding a new fs function to a test, always verify the named import list at the top of the test file. Missing named imports from `'fs'` produce `ReferenceError` at runtime, not at type-check time (if the test file isn't part of the main tsconfig).
+
 📌 **Team update (2026-03-22T09-35Z — Wave 1):** Economy mode fully implemented: ECONOMY_MODEL_MAP + resolveModel() integration in SDK, `squad economy on|off` CLI command, `--economy` flag, 34 tests passing. PR #504 open for review. Soft dependency: #464 rate limit UX should offer economy mode as recovery. Next: Phase 1 of ambient personal squad (T1–T5, T19) — ready to start immediately after merging current work. Procedures wrote governance proposals for squad.agent.md — awaiting Flight review.
 ### Rate Limit UX (#464) (2026-03-20)
 
@@ -128,6 +148,43 @@ Implemented Flight's privacy-first adoption monitoring strategy on PR #326 branc
 
 📌 **Team update (2026-03-10T12-55-49Z):** Adoption tracking Tier 1 complete and merged to decisions.md. Privacy-first architecture confirmed: aggregate metrics only, opt-in for individual repos, public showcase only when 5+ projects opt in. Append-only file governance enforced (no deletions in history.md or decisions.md). Microsoft ampersand style guide adopted for documentation.
 
+### Issue Triage (2026-03-22T06:44:01Z)
+
+**Flight triaged 6 unlabeled issues and filed 1 new issue.**
+
+EECOM assigned:
+- **#481 (StorageProvider PRD)** → squad:control + squad:eecom (type system abstraction + runtime integration)
+- **#479 (history-shadow race condition)** → squad:eecom + squad:retro (production bug; mitigation through StorageProvider atomicity)
+
+Pattern: Three architectural gaps identified (agent spec, state abstraction, quality tooling) + one production bug. StorageProvider abstraction critical for #479 atomicity fix.
+
+📌 **Team update (2026-03-22T06:44:01Z):** Flight issued comprehensive triage. EECOM owns StorageProvider PRD spec (#481) + history-shadow race mitigation (#479). Ready to begin implementation on next sprint.
+
+### PR #483 Review & Merge — Platform Adapter Timeout Fix (2026-03-22)
+
+Reviewed and merged diberry's fix for platform-adapter test timeouts that were blocking all 8 open PRs. Root cause: `getAvailableWorkItemTypes()` called `execFileSync('az', ...)` with no timeout — in CI where az CLI is installed but no real ADO org exists, it hangs indefinitely until Vitest kills it at 5s.
+
+**Fix pattern:** `{ ...EXEC_OPTS, timeout: 3_000 }` — spread existing exec options and add a 3-second timeout. The existing catch block already returns sensible default work item types, so timeout errors fall through gracefully. This is the correct pattern for any external CLI call that might hang: add a timeout to execFileSync and ensure the catch block has a fallback.
+
+**Rebase note:** Branch was already clean on top of dev (1 commit ahead, no divergence). No rebase was needed.
+
+📌 **Team update:** PR #483 merged (squash). This unblocks CI for all open PRs that were failing on platform-adapter test timeouts. The remaining CI failure across PRs is the broken docs link (separate issue).
+
+### PR #480 Review & Merge — History Race Condition Fix (2026-03-22)
+
+Reviewed and merged PR #480 (async mutex + atomic writes + 14 tests). Addresses race condition in history-shadow file operations under concurrent load.
+
+**Fix pattern:** Race conditions in history operations require three-layer defense: (1) async mutex for write serialization, (2) atomic file operations (write-then-rename), (3) comprehensive test coverage (14 tests for edge cases). This pattern applies to any persistent state under concurrent access.
+
+**Key learning:** File system race conditions aren't just "add a lock" — need atomicity guarantees (rename is atomic), serialization (mutex), and exhaustive test coverage to validate edge cases (concurrent writes, stale reads, partial failures).
+
+### PR #486 Review & Merge — SIGINT Handling (2026-03-22)
+
+Reviewed and merged PR #486 (two-layer signal handling + 22 tests). Improves graceful shutdown under SIGINT (Ctrl+C) by cleaning up both parent and child processes.
+
+**Fix pattern:** Signal handling in Node.js requires two layers: (1) parent process SIGINT handler that triggers graceful shutdown, (2) child process cleanup (kill child processes, close file handles, flush buffers). Incomplete cleanup leaves zombie processes or orphaned file locks. Test coverage essential: 22 tests verify process tree cleanup, signal propagation, and edge cases (nested children, immediate re-signals).
+
+**Key learning:** SIGINT handling is more complex than "add a signal handler" — need explicit child process cleanup logic + comprehensive tests. Pattern applies to any process spawning child processes (CLI spawning subshells, REPL spawning child REPL instances, etc.).
 ### Economy Mode Implementation (#500) (2026-03-20)
 
 **Context:** Issue #500 requested economy mode — a session-level and persistent modifier that shifts model selection to cheaper alternatives.

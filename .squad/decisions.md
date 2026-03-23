@@ -6755,6 +6755,106 @@ These governance additions close the loop between the implementation (CLI + SDK)
 **What:** Never send Teams messages to anyone unless Brady explicitly asks and reviews the content first.  
 **Why:** User request — Teams messaging requires explicit approval and content review before sending. Prevents automated or unreviewed communications.
 
+
+---
+
+# Decision: Context-aware upgrade footer message (#549)
+
+**Author:** EECOM  
+**Date:** 2026-07-14  
+**PR:** #551  
+
+## Decision
+
+The upgrade command's summary footer now distinguishes between two outcomes:
+
+- `"Privacy scrub applied"` — shown when the email scrub actually ran (i.e., at least one file was scrubbed)
+- `"Preserves user state"` — shown when no scrub occurred (original intent of the message)
+
+## Rationale
+
+The previous footer always said "Preserves user state" regardless of whether a privacy scrub had just run. When scrubbing did occur, the footer actively contradicted the operation, creating user confusion and loss of trust in the upgrade output.
+
+## Related changes in same commit
+
+- `ensureGitattributes` now catches `EPERM`/`EACCES` and degrades gracefully (warns, returns `[]`) instead of throwing and aborting the upgrade.
+- `ensureGitignore` skips entries already covered by a parent path in the existing file (avoids redundant entries like `.squad/log/` when `.squad/` is present).
+
+## Impact
+
+No breaking changes. Footer text is purely informational. Existing callers of `ensureGitattributes` and `ensureGitignore` receive `[]` on EPERM / parent-covered cases respectively — consistent with the existing return type.
+
+
+# Decision: Community PR Batch Review — July 2026
+
+**By:** Flight  
+**Date:** 2026-07-18  
+**Context:** Five open community PRs reviewed at Brady's request.
+
+## Decisions
+
+### #524 — diberry: Astro docs improvements
+**Decision:** ✅ Approve for merge.  
+**Note:** `docs/public/robots.txt` references `https://squad.dev/sitemap-index.xml` but `astro.config.mjs` still has `site: 'https://bradygaster.github.io'`. If the squad.dev domain is live, this is fine. If not, the sitemap URL needs updating before merge.
+
+### #523 — diberry: Worktree regression guard
+**Decision:** ✅ Approve for merge.  
+**Rationale:** Directly resolves the worktree detection gap (#525). Correct `.git`-file parsing logic, sensible interactive UX, proper TTY fallback.
+
+### #522 — tamirdresher: Watch command circuit breaker integration
+**Decision:** 🔄 Still blocked. Changes requested by bradygaster (additive patch vs. full rewrite) have not been addressed. The PR remains a full 355-line delete + 534-line replacement of watch.ts.  
+**Required:** Rework as a surgical additive patch. Existing structure of watch.ts must be preserved.
+
+### #513 — tamirdresher: Cross-machine-coordination skill
+**Decision:** 🔄 Needs changes before merge.  
+**Required:**
+1. Move from `.squad/skills/` (team-state) to `templates/skills/` (library content) so it ships as a Squad template, not as hardcoded team state.
+2. Replace personal use case examples (voice cloning, DevBox) with generic examples.
+3. Submit a `docs/proposals/cross-machine-coordination.md` per the proposal-first policy. This is a meaningful new coordination primitive.
+
+### #507 — JasonYeYuhe: Chinese README translation
+**Decision:** 🔄 Minor change needed before merge.  
+**Required:** Add a disclaimer block at the top of `README.zh.md` indicating it is community-maintained and may lag behind the English original. Example:
+```
+> ⚠️ This translation is community-maintained and may not reflect the latest changes. For the most up-to-date content, see the [English README](README.md).
+```
+Once added, approve for merge.
+
+## Rationale
+
+- Surgical patches over full rewrites — reinforcing the existing decision from the tamirdresher PR series review.
+- Proposal-first policy applies to cross-machine coordination — it's a meaningful new primitive with security implications.
+- Community translations are welcome but need a freshness disclaimer to set correct expectations for readers.
+- `.squad/` is for team state; reusable skill templates belong in `templates/skills/`.
+
+
+# Decision: Community PR Merge Strategy for tamirdresher #514–#516 Series
+
+**By:** Flight  
+**Date:** 2025-07-18  
+**Context:** Batch review of 4 PRs from tamirdresher (cooperative rate limiting, KEDA scaler docs, machine capabilities, watch integration)
+
+## Decision
+
+1. **#519 (KEDA docs)** — Approve after removing stray `test/capabilities.test.ts` file that belongs to #520. Docs-only, no code risk.
+
+2. **#520 (Machine Capabilities)** — Approve after reverting `package-lock.json` changes (version bump + Node engine change from >=20 to >=22.5.0). SDK module and watch integration are clean.
+
+3. **#518 (Rate Limiting SDK)** — Approve after fixing test import paths to use `@bradygaster/squad-sdk/ralph/rate-limiting` instead of relative `../packages/` paths.
+
+4. **#522 (Watch Integration)** — Request changes. Full rewrite of watch.ts is unacceptable — must be reworked as a surgical patch (add `executeRound` wrapper, circuit breaker state, gh-cli additions) without deleting and recreating the entire file. This is the only PR with real merge conflict risk.
+
+## Merge Order
+
+`#519 → #520 → #518 → #522` (each depends on the previous being clean)
+
+## Rationale
+
+- Surgical patches over full rewrites — watch.ts is a high-traffic file
+- package-lock.json mutations don't belong in feature PRs
+- Node engine requirement changes need their own decision and PR
+- Cross-PR file collisions must be resolved before merge
+
 ---
 
 ## SDK Init Shore-Up Initiative (2026-03-11)
