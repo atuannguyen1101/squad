@@ -1,16 +1,3 @@
-/**
- * Intent graph module exports
- */
-export { IntentGraph } from './IntentGraph.js';
-export { IntentSummarizer } from './IntentSummarizer.js';
-export type {
-  IntentNode,
-  IntentEdge,
-  IntentGraphData,
-  IntentSummary,
-} from './types.js';
-
-// Intent graph utilities
 export {
   createEmptyIntentGraph,
   serializeIntentGraph,
@@ -18,8 +5,19 @@ export {
   updateIntentGraph,
 } from './intent-graph.js';
 
-// Phase output parsers
+export type {
+  IntentGraph,
+  IntentStatus,
+  IntentTask,
+  IntentMetadata,
+} from './intent-graph.js';
+
 export {
   parseUnderstandPhaseOutput,
   parseRoutePhaseOutput,
+} from './parse-phase-output.js';
+
+export type {
+  UnderstandPhaseUpdate,
+  RoutePhaseUpdate,
 } from './parse-phase-output.js';

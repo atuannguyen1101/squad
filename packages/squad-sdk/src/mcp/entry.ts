@@ -9,10 +9,14 @@
  */
 
 import { createSquadMCPServer } from './server.js';
+import { loadConfigSync } from '../runtime/config.js';
 
 const squadRoot = process.env['SQUAD_ROOT'] || process.cwd();
 
-createSquadMCPServer({ squadRoot }).catch((err) => {
+const configResult = loadConfigSync(squadRoot);
+const squadConfig = configResult.config;
+
+createSquadMCPServer({ squadRoot, squadConfig }).catch((err) => {
   process.stderr.write(`[squad-mcp] Fatal: ${err instanceof Error ? err.message : err}\n`);
   process.exit(1);
 });

@@ -1,6 +1,6 @@
 {
   "name": "@bradygaster/squad-sdk",
-"version": "0.8.25-build.18",
+  "version": "0.8.25-build.23",
   "description": "Squad SDK — Programmable multi-agent runtime for GitHub Copilot",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,14 +22,6 @@
       "types": "./dist/config/index.d.ts",
       "import": "./dist/config/index.js"
     },
-    "./config/routing": {
-      "types": "./dist/config/routing.d.ts",
-      "import": "./dist/config/routing.js"
-    },
-    "./config/agent-source": {
-      "types": "./dist/config/agent-source.d.ts",
-      "import": "./dist/config/agent-source.js"
-    },
     "./skills": {
       "types": "./dist/skills/index.d.ts",
       "import": "./dist/skills/index.js"
@@ -37,14 +29,6 @@
     "./agents": {
       "types": "./dist/agents/index.d.ts",
       "import": "./dist/agents/index.js"
-    },
-    "./agents/personal": {
-      "types": "./dist/agents/personal.d.ts",
-      "import": "./dist/agents/personal.js"
-    },
-    "./intent": {
-      "types": "./dist/intent/index.d.ts",
-      "import": "./dist/intent/index.js"
     },
     "./adapter": {
       "types": "./dist/adapter/types.d.ts",
@@ -58,18 +42,6 @@
       "types": "./dist/coordinator/index.d.ts",
       "import": "./dist/coordinator/index.js"
     },
-    "./coordinator/metrics": {
-      "types": "./dist/coordinator/metrics.d.ts",
-      "import": "./dist/coordinator/metrics.js"
-    },
-    "./coordinator/route-scorer": {
-      "types": "./dist/coordinator/route-scorer.d.ts",
-      "import": "./dist/coordinator/route-scorer.js"
-    },
-    "./coordinator/escalation": {
-      "types": "./dist/coordinator/escalation.d.ts",
-      "import": "./dist/coordinator/escalation.js"
-    },
     "./hooks": {
       "types": "./dist/hooks/index.d.ts",
       "import": "./dist/hooks/index.js"
@@ -77,10 +49,6 @@
     "./tools": {
       "types": "./dist/tools/index.d.ts",
       "import": "./dist/tools/index.js"
-    },
-    "./tools/metrics-tool": {
-      "types": "./dist/tools/metrics-tool.d.ts",
-      "import": "./dist/tools/metrics-tool.js"
     },
     "./runtime": {
       "types": "./dist/runtime/config.d.ts",
@@ -109,14 +77,6 @@
     "./ralph/triage": {
       "types": "./dist/ralph/triage.d.ts",
       "import": "./dist/ralph/triage.js"
-    },
-    "./ralph/capabilities": {
-      "types": "./dist/ralph/capabilities.d.ts",
-      "import": "./dist/ralph/capabilities.js"
-    },
-    "./ralph/rate-limiting": {
-      "types": "./dist/ralph/rate-limiting.d.ts",
-      "import": "./dist/ralph/rate-limiting.js"
     },
     "./casting": {
       "types": "./dist/casting/index.d.ts",
@@ -186,10 +146,6 @@
       "types": "./dist/runtime/event-bus-ws-bridge.d.ts",
       "import": "./dist/runtime/event-bus-ws-bridge.js"
     },
-    "./runtime/scheduler": {
-      "types": "./dist/runtime/scheduler.d.ts",
-      "import": "./dist/runtime/scheduler.js"
-    },
     "./runtime/constants": {
       "types": "./dist/runtime/constants.d.ts",
       "import": "./dist/runtime/constants.js"
@@ -198,30 +154,6 @@
       "types": "./dist/builders/index.d.ts",
       "import": "./dist/builders/index.js"
     },
-    "./runtime/cross-squad": {
-      "types": "./dist/runtime/cross-squad.d.ts",
-      "import": "./dist/runtime/cross-squad.js"
-    },
-    "./runtime/otel-init": {
-      "types": "./dist/runtime/otel-init.d.ts",
-      "import": "./dist/runtime/otel-init.js"
-    },
-    "./config/models": {
-      "types": "./dist/config/models.d.ts",
-      "import": "./dist/config/models.js"
-    },
-    "./mcp/proposal-pipeline": {
-      "types": "./dist/mcp/proposal-pipeline.d.ts",
-      "import": "./dist/mcp/proposal-pipeline.js"
-    },
-    "./server/ceremony-runner": {
-      "types": "./dist/server/ceremony-runner.d.ts",
-      "import": "./dist/server/ceremony-runner.js"
-    },
-    "./server/ceremonies/retrospective": {
-      "types": "./dist/server/ceremonies/retrospective.d.ts",
-      "import": "./dist/server/ceremonies/retrospective.js"
-    },
     "./server": {
       "types": "./dist/server/index.d.ts",
       "import": "./dist/server/index.js"
@@ -229,6 +161,26 @@
     "./mcp": {
       "types": "./dist/mcp/index.d.ts",
       "import": "./dist/mcp/index.js"
+    },
+    "./pipeline": {
+      "types": "./dist/pipeline/index.d.ts",
+      "import": "./dist/pipeline/index.js"
+    },
+    "./intent": {
+      "types": "./dist/intent/index.d.ts",
+      "import": "./dist/intent/index.js"
+    },
+    "./pulse": {
+      "types": "./dist/pulse/index.d.ts",
+      "import": "./dist/pulse/index.js"
+    },
+    "./context": {
+      "types": "./dist/context/index.d.ts",
+      "import": "./dist/context/index.js"
+    },
+    "./scratchpad": {
+      "types": "./dist/scratchpad/index.d.ts",
+      "import": "./dist/scratchpad/index.js"
     }
   },
   "files": [
@@ -237,16 +189,16 @@
     "README.md"
   ],
   "scripts": {
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build",
-    "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "build": "tsc -p tsconfig.json"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=20"
   },
   "dependencies": {
     "@github/copilot-sdk": "^0.1.32",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "vscode-jsonrpc": "^8.2.1"
   },
   "optionalDependencies": {
@@ -264,8 +216,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.13",
-    "typescript": "^5.7.0",
-    "vitest": "^2.0.0"
+    "typescript": "^5.7.0"
   },
   "keywords": [
     "copilot",

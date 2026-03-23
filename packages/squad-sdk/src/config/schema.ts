@@ -12,6 +12,13 @@ export interface SquadConfig {
   hooks?: HooksConfig;
   ceremonies?: CeremonyConfig[];
   plugins?: PluginConfig;
+  /**
+   * Automatically run Sage analysis after each pipeline completes.
+   * When true, the analysis report is generated and dispatched to Sage
+   * for interpretation as post-processing (does not block pipeline completion).
+   * @default false
+   */
+  autoAnalyze?: boolean;
 }
 
 export interface TeamConfig {
@@ -65,15 +72,11 @@ export interface HooksConfig {
 
 export interface CeremonyConfig {
   name: string;
-  /** Ceremony type — determines the runner behavior. Defaults to 'custom'. */
-  type?: 'retrospective' | 'custom';
-  /** Trigger condition: 'all-sessions-closed' | 'pipeline-idle' | 'manual'. */
-  trigger?: string;
+  trigger?: 'all-sessions-closed' | 'pipeline-idle' | 'manual';
   schedule?: string;
   participants?: string[];
   agenda?: string;
   enabled?: boolean;
-  /** Idle timeout in milliseconds (for pipeline-idle trigger). */
   idleTimeoutMs?: number;
 }
 

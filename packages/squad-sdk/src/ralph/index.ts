@@ -84,10 +84,8 @@ export class RalphMonitor {
       eventBus.subscribe('agent:milestone', (event) => this.handleEvent(event)),
     );
 
-    const interval = this.config.healthCheckInterval ?? 30_000;
-    this.healthCheckTimer = setInterval(() => {
-      void this.healthCheck();
-    }, interval);
+    // CRON DISABLED — GitHub Actions cron costs too much. Use event triggers or `squad watch` instead.
+    // Heartbeat timer permanently removed; Ralph uses event-driven activation only.
   }
 
   /** Handle an incoming event from the EventBus */
@@ -183,6 +181,3 @@ export class RalphMonitor {
     this.eventBus = null;
   }
 }
-
-export { loadCapabilities, canHandleIssue, filterByCapabilities, extractNeeds, type MachineCapabilities, KNOWN_CAPABILITIES } from './capabilities.js';
-export { getTrafficLight, shouldProceed, getRetryDelay, PredictiveCircuitBreaker, canUseQuota, loadRatePool, type RatePool, type RatePoolAllocation, type RateSample, type TrafficLight, type AgentPriority } from './rate-limiting.js';

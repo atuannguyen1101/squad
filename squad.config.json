@@ -1,0 +1,1 @@
+{"version":"1","autoAnalyze":true,"models":{"defaultModel":"claude-sonnet-4.5","defaultTier":"standard","fallbackChains":{"premium":[],"standard":[],"fast":[]}},"routing":{"rules":[]}}

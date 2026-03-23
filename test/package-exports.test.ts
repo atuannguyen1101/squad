@@ -46,4 +46,11 @@ describe('SDK package exports', () => {
     const tools = await import('@bradygaster/squad-sdk/tools');
     expect(tools).toBeDefined();
   });
+
+  it('exports from /scratchpad subpath', async () => {
+    const scratchpad = await import('@bradygaster/squad-sdk/scratchpad');
+    expect(scratchpad).toBeDefined();
+    expect(scratchpad.Scratchpad).toBeDefined();
+    expect(scratchpad.DEFAULT_SCRATCHPAD_CONFIG).toBeDefined();
+  });
 });

@@ -37,9 +37,7 @@ squad init
 
 **✓ Validate:** Check that `.squad/team.md` was created in your project.
 
-**Or use npx (no install):** `npx @bradygaster/squad-cli` — see [Migration Guide](https://bradygaster.github.io/squad/docs/get-started/migration/) if upgrading from an older version.
-
-### 3. Authenticate with GitHub (for Issues, PRs, and Ralph)
+### 3. Authenticate with GitHub(for Issues, PRs, and Ralph)
 
 ```bash
 gh auth login
@@ -49,13 +47,16 @@ gh auth login
 
 ### 4. Open Copilot and go
 
+**Recommended:** start Copilot with `--yolo`.
+
 ```
-copilot --agent squad --yolo
+copilot --yolo
 ```
 
-> **Why `--yolo`?** Squad makes many tool calls in a typical session. Without it, Copilot will prompt you to approve each one.
+> **Why use `--yolo`?** Squad makes many tool calls in a typical session. Without it, Copilot will prompt you to approve each one.
 
-**In VS Code**, open Copilot Chat and select the **Squad** agent.
+**In the GitHub Copilot CLI**, type `/agent` and select **Squad**.
+**In VS Code**, type `/agents` and select **Squad**.
 
 Then:
 
@@ -81,7 +82,6 @@ Squad proposes a team — each member named from a persistent thematic cast. You
 | `squad copilot` | Add/remove the Copilot coding agent (@copilot); use `--off` to remove, `--auto-assign` to enable auto-assignment |
 | `squad doctor` | Check your setup and diagnose issues (alias: `heartbeat`) |
 | `squad link <team-repo-path>` | Connect to a remote team |
-| `squad shell` | Launch interactive shell explicitly |
 | `squad export` | Export squad to a portable JSON snapshot |
 | `squad import <file>` | Import squad from an export file |
 | `squad plugin marketplace add\|remove\|list\|browse` | Manage plugin marketplaces |
@@ -91,62 +91,6 @@ Squad proposes a team — each member named from a persistent thematic cast. You
 | `squad scrub-emails [directory]` | Remove email addresses from Squad state files (default: `.squad/`) |
 
 ---
-
-## Interactive Shell
-
-Tired of typing `squad` followed by a command every time? Enter the interactive shell.
-
-### Entering the Shell
-
-```bash
-squad
-```
-
-No arguments. Just `squad`. You'll get a prompt:
-
-```
-squad >
-```
-
-You're now connected to your team. Talk to them.
-
-### Shell Commands
-
-All shell commands start with `/`:
-
-| Command | What it does |
-|---------|-------------|
-| `/status` | Check your team and what's happening |
-| `/history` | See recent messages |
-| `/agents` | List all team members |
-| `/sessions` | List saved sessions |
-| `/resume <id>` | Restore a past session |
-| `/version` | Show version |
-| `/clear` | Clear the screen |
-| `/help` | Show all commands |
-| `/quit` | Exit the shell (or Ctrl+C) |
-
-### Talking to Agents
-
-Use `@AgentName` (case-insensitive) or natural language with a comma:
-
-```
-squad > @Keaton, analyze the architecture of this project
-squad > McManus, write a blog post about our new feature
-squad > Build the login page
-```
-
-The coordinator routes messages to the right agents. Multiple agents can work in parallel—you'll see progress in real-time.
-
-### What the Shell Does
-
-- **Real-time visibility:** See agents working, decisions being recorded, blockers as they happen
-- **Message routing:** Describe what you need; the coordinator figures out who should do it
-- **Parallel execution:** Multiple agents work simultaneously on independent tasks
-- **Session persistence:** If an agent crashes, it resumes from checkpoint; you never lose context
-- **Decision logging:** Every decision is recorded in `.squad/decisions.md` for the whole team to see
-
-For more details on shell usage, see the commands table above.
 
 ## Samples
 
@@ -167,8 +111,6 @@ For insider builds:
 ```bash
 npm install -g @bradygaster/squad-cli@insider
 ```
-
-> **Note:** GitHub-native distribution (`npx github:bradygaster/squad`) has been removed. All distribution is now via npm (see [Migration Guide](https://bradygaster.github.io/squad/docs/get-started/migration/) for details).
 
 ---
 
@@ -225,25 +167,6 @@ When agents finish, the coordinator immediately chains follow-up work. If you st
 
 **Commit this folder.** Your team persists. Names persist. Anyone who clones gets the team — with the same cast.
 
-### SDK-First Mode (New in Phase 1)
-
-Prefer TypeScript? You can define your team in code instead of markdown. Create a `squad.config.ts` with builder functions, run `squad build`, and the `.squad/` files are generated automatically.
-
-```typescript
-// squad.config.ts
-import { defineSquad, defineTeam, defineAgent } from '@bradygaster/squad-sdk';
-
-export default defineSquad({
-  team: defineTeam({ name: 'Platform Squad', members: ['@edie', '@mcmanus'] }),
-  agents: [
-    defineAgent({ name: 'edie', role: 'TypeScript Engineer', model: 'claude-sonnet-4' }),
-    defineAgent({ name: 'mcmanus', role: 'DevRel', model: 'claude-haiku-4.5' }),
-  ],
-});
-```
-
-Run `squad build` to generate all the markdown. See the [SDK-First Mode Guide](docs/src/content/docs/sdk-first-mode.md) for full documentation.
-
 ---
 
 ## Monorepo Development
@@ -291,7 +214,7 @@ Squad uses [changesets](https://github.com/changesets/changesets) for independen
 
 ```bash
 # Add a changeset
-npx changeset add
+squad changeset add
 
 # Validate changesets
 npm run changeset:check
@@ -687,7 +610,7 @@ npm run lint           # Type check (tsc --noEmit)
 - **GitHub Copilot CLI & VS Code** — Squad works on both CLI and VS Code
 - **`gh` CLI required** — GitHub Issues, PRs, Ralph, and Project Boards all need `gh auth login`
 - **Knowledge grows with use** — the first session is the least capable; agents improve as they accumulate history
-- **npm distribution only** — Install via `npm install -g @bradygaster/squad-cli` or `npx @bradygaster/squad-cli`. GitHub-native distribution (`npx github:`) is no longer supported.
+- **npm distribution only** — Install via `npm install -g @bradygaster/squad-cli`.
 
 ---
 

@@ -1,12 +1,12 @@
 ---
-updated_at: 2026-03-16T12:30:00Z
-focus_area: "Skills migration + three-layer tooling (#330 + #354) — RELEASE BLOCKER"
-version: v0.8.25-build.10
-branch: dev
-tests_passing: ~4321
+updated_at: 2026-03-11T01:35:00Z
+focus_area: SDK Init Shore-Up (PRD in progress)
+version: v0.8.24
+branch: main
+tests_passing: 3931
 tests_todo: 46
 tests_skipped: 5
-test_files: 154
+test_files: 149
 team_size: 19 active agents + Scribe + Ralph + @copilot
 team_identity: Apollo 13 / NASA Mission Control
 process: All work through PRs. Branch naming squad/{issue-number}-{slug}. Never commit to main directly.
@@ -14,47 +14,51 @@ process: All work through PRs. Branch naming squad/{issue-number}-{slug}. Never 
 
 # What We're Focused On
 
-**Status:** Skills migration and three-layer tooling awareness are the team's #1 priority. These two issues (#330 + #354) MUST ship together before the next release. All team efforts focused here.
+**Status:** SDK Init Shore-Up initiative. Unified PRD drafted consolidating 6 SDK-related issues (#337-#342) into a 3-phase plan. Technical analysis and implementation roadmap complete. Awaiting Brady's decisions on open questions before Phase 1 kickoff.
 
-## The Big One — Skills Migration + Three-Layer Tooling (#330 + #354)
+## Current Initiative: SDK Init Shore-Up
 
-**RELEASE BLOCKER — must ship before next release.**
+**PRD:** `.squad/identity/prd-sdk-init-shoreup.md`
+**Technical Analysis:** `.squad/identity/sdk-init-technical-analysis.md`
+**Implementation Roadmap:** `.squad/identity/sdk-init-implementation-roadmap.md`
 
-Two issues, one body of work:
-- **#330** (spboyer) — Coordinator detects and enforces all three tooling layers (local skills, global MCP, global Copilot skills)
-- **#354** (bradygaster) — Migrate skills from `.squad/skills/` to `.copilot/skills/`
+### Phase 1: Fix the Gaps (P1, Small scope)
+- #337 — Config ↔ team.md sync broken → EECOM + CAPCOM
+- #338 — Ralph missing from generated config → EECOM + CAPCOM
+- #339 — @copilot routing without roster entry → EECOM + CAPCOM
 
-### Why this matters
-- Skills in `.squad/skills/` are invisible to Copilot's discovery system
-- Global MCP tools (azure-mcp-*, etc.) are detected but not enforced — no pre-flight research
-- Global Copilot skills are completely invisible to the coordinator
-- 11 of 13 deployment fix commits in Shayne's Azure session were avoidable with available tools
-- ~115KB of skill content loaded fully on every routing decision (vs frontmatter-only scanning in `.copilot/skills/`)
+### Phase 2: Wire CastingEngine (P1, Medium scope)
+- #342 — CLI casting bypasses CastingEngine → EECOM + Procedures
 
-### Execution sequence
-1. **Prototype** — verify spawned agents inherit MCP tools from parent session (gates design)
-2. **Governance** — update squad.agent.md (6 refs), add three-layer model + pre-flight rules
-3. **SDK/CLI** — update init, upgrade (migration), export/import, doctor, SkillScriptLoader paths
-4. **Physical move** — 23 skills from `.squad/skills/` → `.copilot/skills/`, update cross-refs
-5. **Backward compat** — check both locations for one version
-6. **Tests** — skill routing, migration, backward compat
-7. **Docs** — update all path references
+### Phase 3: Exercise Test Matrix (P2, Large scope)
+- #340 — 29 features need active exercise testing → FIDO + CAPCOM
+- #341 — Full test results (32/50 verified) → FIDO + CAPCOM
 
-### Gating question
-Do spawned `general-purpose` agents inherit MCP tools from the coordinator's session? This determines whether "Azure skills + Azure MCP" is a real pipeline or just documentation.
+### Open Design Questions
+1. AST vs regex for squad.config.ts mutations
+2. CastingEngine: augment LLM proposals (recommended) or replace entirely?
+3. Ralph charter: create one, or document as "built-in, no charter"?
 
-## Next Up (After #330/#354)
+## 🚨 Next Session: Start Here
 
-### Quick Wins
-- **#320** — Docs migration guide version pin (PAO)
-- **#347** — SDK init quality gate (FIDO)
+**Pick up the SDK Init PRDs.** The unified PRD at `.squad/identity/prd-sdk-init-shoreup.md` is ready for implementation. This is up for grabs — the team's next priority.
 
-### Recently Shipped
-- **#322** — Model selection updated to Claude Sonnet 4.6 / GPT-5.4 (PR #429, merged)
-- **#342** — Closed (already shipped via PR #417)
-- **A2A (#332-336)** — Shelved (too risky short-term)
-- **#316, #357** — Shelved (A2A dependency)
+Before starting:
+1. Fix EMU auth: `gh auth logout --user bradyg_microsoft`
+2. Apply triage labels to the 10 unlabeled issues
+3. Get Brady's decisions on open design questions (AST vs regex, CastingEngine approach, Ralph charter)
+4. Kick off Phase 1 implementation
+
+## Current State
+
+**Version:** v0.8.24 (released, on npm)
+- **Packages:** @bradygaster/squad-sdk, @bradygaster/squad-cli
+- **Branch:** main
+- **Build:** ✅ clean (0 errors)
+- **Tests:** 3,931 passed, 46 todo, 5 skipped, 149 test files (~89s)
+
+**Open Issues:** 30 total. 10 newly triaged this session (labels blocked by EMU auth — need `gh auth logout --user bradyg_microsoft`).
 
 ## Process
 
-All work through PRs. Branch naming: `squad/{issue-number}-{slug}`. Never commit to main directly. Squad member review before merge. Always use bradygaster (personal) GitHub account for this repo.
+All work through PRs. Branch naming: `squad/{issue-number}-{slug}`. Never commit to main directly. Squad member review before merge.

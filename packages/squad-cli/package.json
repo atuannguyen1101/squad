@@ -1,6 +1,6 @@
 {
   "name": "@bradygaster/squad-cli",
-  "version": "0.8.25-build.18",
+  "version": "0.8.25-build.23",
   "description": "Squad CLI — Command-line interface for the Squad multi-agent runtime",
   "type": "module",
   "bin": {
@@ -100,6 +100,14 @@
       "types": "./dist/cli/commands/doctor.d.ts",
       "import": "./dist/cli/commands/doctor.js"
     },
+    "./commands/hello": {
+      "types": "./dist/cli/commands/hello.d.ts",
+      "import": "./dist/cli/commands/hello.js"
+    },
+    "./commands/greet": {
+      "types": "./dist/cli/commands/greet.d.ts",
+      "import": "./dist/cli/commands/greet.js"
+    },
     "./commands/aspire": {
       "types": "./dist/cli/commands/aspire.d.ts",
       "import": "./dist/cli/commands/aspire.js"
@@ -136,21 +144,9 @@
       "types": "./dist/cli/commands/copilot.d.ts",
       "import": "./dist/cli/commands/copilot.js"
     },
-    "./commands/cost": {
-      "types": "./dist/cli/commands/cost.d.ts",
-      "import": "./dist/cli/commands/cost.js"
-    },
     "./commands/copilot-bridge": {
       "types": "./dist/cli/commands/copilot-bridge.d.ts",
       "import": "./dist/cli/commands/copilot-bridge.js"
-    },
-    "./commands/personal": {
-      "types": "./dist/cli/commands/personal.d.ts",
-      "import": "./dist/cli/commands/personal.js"
-    },
-    "./commands/cast": {
-      "types": "./dist/cli/commands/cast.d.ts",
-      "import": "./dist/cli/commands/cast.js"
     }
   },
   "files": [
@@ -166,10 +162,10 @@
     "postbuild": "node -e \"require('fs').cpSync('src/remote-ui', 'dist/remote-ui', {recursive: true})\" && node -e \"require('fs').cpSync('src/dashboard', 'dist/dashboard', {recursive: true})\""
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=20"
   },
   "dependencies": {
-    "@bradygaster/squad-sdk": "*",
+    "@bradygaster/squad-sdk": "0.8.25",
     "ink": "^6.8.0",
     "react": "^19.2.4",
     "vscode-jsonrpc": "^8.2.1"

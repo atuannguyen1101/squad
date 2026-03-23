@@ -3,32 +3,20 @@
  *
  * Defines Squad's custom tools registered with the SDK via defineTool().
  * Tools provide agents with typed, validated orchestration primitives:
- *   - squad_route:     Route work to another agent via session pool
- *   - squad_decide:    Write a typed decision to the inbox drop-box
- *   - squad_memory:    Append to agent history (learnings, updates)
- *   - squad_status:    Query session pool state
- *   - squad_skill:     Read/write agent skills
- *   - squad_proposals: Manage improvement proposals (create, list, update, apply)
+ *   - squad_route:  Route work to another agent via session pool
+ *   - squad_decide: Write a typed decision to the inbox drop-box
+ *   - squad_memory: Append to agent history (learnings, updates)
+ *   - squad_status: Query session pool state
+ *   - squad_skill:  Read/write agent skills
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { SquadTool, SquadToolResult } from '../adapter/types.js';
+import { createPulse, filterPulseForUser, type PulseFilter } from '../pulse/index.js';
+import type { Scratchpad } from '../scratchpad/index.js';
 import { trace, SpanStatusCode } from '../runtime/otel-api.js';
-import {
-  classifyProposalRisk,
-  generateProposalId,
-  formatProposalMarkdown,
-  createProposalRecord,
-  autoApplyProposal,
-  saveAppliedRecord,
-  recordApplicationForTracking,
-  type ImprovementProposal as PipelineProposal,
-  type ProposalCategory as PipelineCategory,
-  type ProposalPriority as PipelinePriority,
-  type ProposalStatus,
-} from '../mcp/proposal-pipeline.js';
 
 const tracer = trace.getTracer('squad-sdk');
 
@@ -102,7 +90,7 @@ export interface StatusQuery {
 }
 
 export interface SkillRequest {
-  /** Skill name (maps to .copilot/skills/{name}/SKILL.md) */
+  /** Skill name (maps to .squad/skills/{name}/SKILL.md) */
   skillName: string;
   /** Operation: read the skill or write/update it */
   operation: 'read' | 'write';
@@ -112,39 +100,82 @@ export interface SkillRequest {
   confidence?: 'low' | 'medium' | 'high';
 }
 
-export interface ProposalRequest {
-  /** Operation to perform on proposals */
-  operation: 'create' | 'list' | 'update' | 'apply';
-  /** Proposal data (required for create) */
-  proposal?: {
-    title: string;
-    category: string;
-    targetFile: string;
-    description: string;
-    evidence: string;
-    priority: string;
-  };
-  /** Status filter for list operation (default: 'pending') */
-  statusFilter?: 'pending' | 'approved' | 'rejected' | 'applied';
-  /** Proposal filename for update/apply operations */
-  proposalFile?: string;
-  /** New status for update operation */
-  newStatus?: 'approved' | 'rejected';
-  /** Review comment for update operation */
-  reviewComment?: string;
+export interface PulseRequest {
+  agent: string;
+  phase: 'starting' | 'analyzing' | 'implementing' | 'testing' | 'reviewing' | 'done' | 'blocked';
+  status: 'ok' | 'warning' | 'error';
+  progressPct: number;
+  summary: string;
+  blockers?: string[];
+  questionsForUser?: string[];
+  artifacts?: string[];
+  nextStep?: string;
 }
 
-export interface HandoffRequest {
-  /** Target agent to handle the sub-task */
-  toAgent: string;
-  /** Sub-task description */
-  task: string;
-  /** Additional context */
-  context?: string;
-  /** Wait for result or fire-and-forget (default: true) */
-  waitForResult?: boolean;
+export interface ScratchpadWriteRequest {
+  /** Key for the artifact (recommended: `agent:name`) */
+  key: string;
+  /** Value to store */
+  value: string;
+  /** Agent name writing the artifact */
+  producer: string;
+  /** Optional tags for filtering */
+  tags?: string[];
+}
+
+export interface ScratchpadReadRequest {
+  /** Key to read */
+  key: string;
+}
+
+export interface ScratchpadListRequest {
+  /** Filter by producer agent */
+  producer?: string;
+  /** Filter by tag */
+  tag?: string;
+}
+
+// --- Proposal Types ---
+
+export type ProposalStatus = 'pending' | 'approved' | 'rejected';
+export type ProposalPriority = 'low' | 'medium' | 'high' | 'critical';
+
+export interface ProposalRecord {
+  /** Proposal title */
+  title: string;
+  /** Category (e.g. "performance", "architecture", "testing", "documentation") */
+  category: string;
+  /** Target file or module this proposal affects */
+  targetFile: string;
+  /** Detailed description of the proposed improvement */
+  description: string;
+  /** Evidence or rationale supporting this proposal */
+  evidence: string;
   /** Priority level */
-  priority?: 'low' | 'normal' | 'high' | 'critical';
+  priority: ProposalPriority;
+  /** Author agent name */
+  author?: string;
+}
+
+export interface ProposalActionRequest {
+  /** Operation to perform */
+  operation: 'create' | 'list' | 'update';
+
+  // --- Fields for 'create' ---
+  /** Proposal data (required for 'create') */
+  proposal?: ProposalRecord;
+
+  // --- Fields for 'list' ---
+  /** Filter by status (default: 'pending') */
+  statusFilter?: ProposalStatus;
+
+  // --- Fields for 'update' ---
+  /** Proposal filename to update (required for 'update') */
+  proposalFile?: string;
+  /** New status (required for 'update') */
+  newStatus?: 'approved' | 'rejected';
+  /** Optional reviewer comment */
+  reviewComment?: string;
 }
 
 // --- Tool Definition Helper ---
@@ -205,36 +236,34 @@ export function defineTool<TArgs = unknown>(config: {
   };
 }
 
-// --- Error Sanitization ---
-
-/**
- * Sanitize error messages before sending to LLM.
- * Strips absolute filesystem paths by replacing the squadRoot prefix with [team-root].
- */
-function sanitizeErrorForLlm(error: unknown, squadRoot: string): string {
-  const msg = error instanceof Error ? error.message : String(error);
-  return msg.replace(new RegExp(squadRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), '[team-root]');
-}
-
 // --- Tool Registry ---
 
 export class ToolRegistry {
   private tools: Map<string, SquadTool<any>> = new Map();
   private squadRoot: string;
   private sessionPoolGetter?: () => any;
-  private handoffManager?: any;
   private dispatchGetter?: () => ((agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string }>) | undefined;
+  private sendFollowUpGetter?: () => ((agentName: string, message: string) => Promise<string | null>) | undefined;
+  private getMessagesGetter?: () => ((agentName: string) => { role: string; content: string; timestamp: string }[]) | undefined;
+  private pulseRecordGetter?: () => ((pulse: PulseRequest) => PulseFilter) | undefined;
+  private scratchpadGetter?: () => Scratchpad | null;
 
   constructor(
     squadRoot = '.squad',
     sessionPoolGetter?: () => any,
-    handoffManager?: any,
     dispatchGetter?: () => ((agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string }>) | undefined,
+    sendFollowUpGetter?: () => ((agentName: string, message: string) => Promise<string | null>) | undefined,
+    getMessagesGetter?: () => ((agentName: string) => { role: string; content: string; timestamp: string }[]) | undefined,
+    pulseRecordGetter?: () => ((pulse: PulseRequest) => PulseFilter) | undefined,
+    scratchpadGetter?: () => Scratchpad | null,
   ) {
     this.squadRoot = squadRoot;
     this.sessionPoolGetter = sessionPoolGetter;
-    this.handoffManager = handoffManager;
     this.dispatchGetter = dispatchGetter;
+    this.sendFollowUpGetter = sendFollowUpGetter;
+    this.getMessagesGetter = getMessagesGetter;
+    this.pulseRecordGetter = pulseRecordGetter;
+    this.scratchpadGetter = scratchpadGetter;
     this.registerSquadTools();
   }
 
@@ -279,7 +308,7 @@ export class ToolRegistry {
         const dispatch = this.dispatchGetter?.();
         if (!dispatch) {
           // Fallback: no server connected, write to mailbox file instead
-          const mailboxDir = path.join(this.squadRoot, 'mailbox', args.targetAgent);
+          const mailboxDir = path.join(this.squadRoot, '.squad', 'mailbox', args.targetAgent);
           fs.mkdirSync(mailboxDir, { recursive: true });
           const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
           const filename = path.join(mailboxDir, `${timestamp}-route.md`);
@@ -353,11 +382,8 @@ export class ToolRegistry {
         required: ['author', 'summary', 'body'],
       },
       handler: async (args) => {
-        if (!/^[a-zA-Z0-9_-]+$/.test(args.author)) {
-          return { textResultForLlm: 'Invalid author name: must contain only letters, numbers, hyphens, and underscores', resultType: 'failure', error: 'Invalid author' };
-        }
         try {
-          const inboxDir = path.join(this.squadRoot, 'decisions', 'inbox');
+          const inboxDir = path.join(this.squadRoot, '.squad', 'decisions', 'inbox');
           fs.mkdirSync(inboxDir, { recursive: true });
 
           const decisionId = randomUUID();
@@ -385,13 +411,13 @@ export class ToolRegistry {
           fs.writeFileSync(filename, content, 'utf-8');
 
           return {
-            textResultForLlm: `Decision written: ${args.author}-${slug}.md (ID: ${decisionId})`,
+            textResultForLlm: `Decision written to ${filename} (ID: ${decisionId})`,
             resultType: 'success',
             toolTelemetry: { decisionId, filename, slug },
           };
         } catch (error) {
           return {
-            textResultForLlm: `Failed to write decision: ${sanitizeErrorForLlm(error, this.squadRoot)}`,
+            textResultForLlm: `Failed to write decision: ${error}`,
             resultType: 'failure',
             error: String(error),
           };
@@ -423,15 +449,12 @@ export class ToolRegistry {
         required: ['agent', 'section', 'content'],
       },
       handler: async (args) => {
-        if (!/^[a-zA-Z0-9_-]+$/.test(args.agent)) {
-          return { textResultForLlm: 'Invalid agent name: must contain only letters, numbers, hyphens, and underscores', resultType: 'failure', error: 'Invalid agent name' };
-        }
         try {
-          const historyFile = path.join(this.squadRoot, 'agents', args.agent, 'history.md');
+          const historyFile = path.join(this.squadRoot, '.squad', 'agents', args.agent, 'history.md');
           
           if (!fs.existsSync(historyFile)) {
             return {
-              textResultForLlm: `Agent history file not found: agents/${args.agent}/history.md`,
+              textResultForLlm: `Agent history file not found: ${historyFile}`,
               resultType: 'failure',
               error: 'History file does not exist',
             };
@@ -464,7 +487,7 @@ export class ToolRegistry {
           };
         } catch (error) {
           return {
-            textResultForLlm: `Failed to update agent memory: ${sanitizeErrorForLlm(error, this.squadRoot)}`,
+            textResultForLlm: `Failed to update agent memory: ${error}`,
             resultType: 'failure',
             error: String(error),
           };
@@ -589,7 +612,7 @@ export class ToolRegistry {
     // squad_skill: Read/write agent skills
     const squadSkill = defineTool<SkillRequest>({
       name: 'squad_skill',
-      description: 'Read or write agent skill definitions. Skills are stored in .copilot/skills/{name}/SKILL.md.',
+      description: 'Read or write agent skill definitions. Skills are stored in .squad/skills/{name}/SKILL.md.',
       parameters: {
         type: 'object',
         properties: {
@@ -615,18 +638,8 @@ export class ToolRegistry {
         required: ['skillName', 'operation'],
       },
       handler: async (args) => {
-        if (!/^[a-zA-Z0-9_-]+$/.test(args.skillName)) {
-          return { textResultForLlm: 'Invalid skill name: must contain only letters, numbers, hyphens, and underscores', resultType: 'failure', error: 'Invalid skillName' };
-        }
         try {
-          const projectRoot = path.dirname(this.squadRoot);
-          const legacySkillDir = path.join(this.squadRoot, 'skills', args.skillName);
-          const copilotSkillDir = path.join(projectRoot, '.copilot', 'skills', args.skillName);
-          const skillDir = args.operation === 'write'
-            ? copilotSkillDir
-            : fs.existsSync(path.join(copilotSkillDir, 'SKILL.md'))
-              ? copilotSkillDir
-              : legacySkillDir;
+          const skillDir = path.join(this.squadRoot, 'skills', args.skillName);
           const skillFile = path.join(skillDir, 'SKILL.md');
 
           if (args.operation === 'read') {
@@ -668,14 +681,14 @@ export class ToolRegistry {
             fs.writeFileSync(skillFile, skillContent, 'utf-8');
 
             return {
-              textResultForLlm: `Skill written: ${args.skillName} (.copilot/skills/${args.skillName}/SKILL.md)`,
+              textResultForLlm: `Skill written: ${args.skillName} (${skillFile})`,
               resultType: 'success',
               toolTelemetry: { skillName: args.skillName, operation: 'write', confidence: args.confidence },
             };
           }
         } catch (error) {
           return {
-            textResultForLlm: `Failed to ${args.operation} skill: ${sanitizeErrorForLlm(error, this.squadRoot)}`,
+            textResultForLlm: `Failed to ${args.operation} skill: ${error}`,
             resultType: 'failure',
             error: String(error),
           };
@@ -683,266 +696,493 @@ export class ToolRegistry {
       },
     });
 
-    // squad_proposals: Manage improvement proposals
-    const squadProposals = defineTool<ProposalRequest>({
+    // squad_send: Send a message and wait for response
+    const squadSend = defineTool<{ agentName: string; message: string }>({
+      name: 'squad_send',
+      description: 'Send a message to an existing agent session and wait for their response. Use for coordination, handoffs, and checking results.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agentName: { type: 'string', description: 'Name of the target agent (must have an active session)' },
+          message: { type: 'string', description: 'The message to send to the agent' },
+        },
+        required: ['agentName', 'message'],
+      },
+      handler: async (args) => {
+        const sendFn = this.sendFollowUpGetter?.();
+        if (!sendFn) {
+          return {
+            textResultForLlm: 'squad_send not available — server not connected.',
+            resultType: 'failure',
+            error: 'No sendFollowUp function available',
+          };
+        }
+        try {
+          const response = await sendFn(args.agentName, args.message);
+          if (response) {
+            return { textResultForLlm: response, resultType: 'success' };
+          }
+          return {
+            textResultForLlm: `Message sent to ${args.agentName} but no response captured. Use squad_read_session to check later.`,
+            resultType: 'success',
+          };
+        } catch (error) {
+          return {
+            textResultForLlm: `Failed to send to ${args.agentName}: ${error instanceof Error ? error.message : error}`,
+            resultType: 'failure',
+            error: String(error),
+          };
+        }
+      },
+    });
+
+    // squad_read_session: Read agent conversation history
+    const squadReadSession = defineTool<{ agentName: string; lastN?: number }>({
+      name: 'squad_read_session',
+      description: 'Read the conversation history of an agent session. Returns messages (dispatches and replies). Use to check progress or get results.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agentName: { type: 'string', description: 'Name of the agent whose session to read' },
+          lastN: { type: 'number', description: 'Only return the last N messages (default: all)' },
+        },
+        required: ['agentName'],
+      },
+      handler: async (args) => {
+        const getMsgsFn = this.getMessagesGetter?.();
+        if (!getMsgsFn) {
+          return {
+            textResultForLlm: 'squad_read_session not available — server not connected.',
+            resultType: 'failure',
+            error: 'No getMessages function available',
+          };
+        }
+        try {
+          const messages = getMsgsFn(args.agentName);
+          if (messages.length === 0) {
+            return {
+              textResultForLlm: `No messages found for ${args.agentName}. Agent may not have an active session.`,
+              resultType: 'success',
+            };
+          }
+          const sliced = args.lastN ? messages.slice(-args.lastN) : messages;
+          const formatted = sliced.map((m, i) => {
+            const role = m.role === 'user' ? '→ SENT' : '← REPLY';
+            const ts = m.timestamp ? ` (${m.timestamp.slice(11, 19)})` : '';
+            const content = m.content.length > 4000 ? m.content.slice(0, 4000) + '\n... (truncated)' : m.content;
+            return `[${i + 1}] ${role}${ts}:\n${content}`;
+          }).join('\n\n---\n\n');
+          return {
+            textResultForLlm: `Session history for ${args.agentName} (${sliced.length}/${messages.length} messages):\n\n${formatted}`,
+            resultType: 'success',
+          };
+        } catch (error) {
+          return {
+            textResultForLlm: `Failed to read session for ${args.agentName}: ${error instanceof Error ? error.message : error}`,
+            resultType: 'failure',
+            error: String(error),
+          };
+        }
+      },
+    });
+
+    // Register all tools
+    this.tools.set('squad_route', squadRoute);
+    this.tools.set('squad_send', squadSend);
+    this.tools.set('squad_read_session', squadReadSession);
+    this.tools.set('squad_decide', squadDecide);
+    this.tools.set('squad_memory', squadMemory);
+    this.tools.set('squad_status', squadStatus);
+    this.tools.set('squad_skill', squadSkill);
+
+    const squadPulse = defineTool<PulseRequest>({
+      name: 'squad_pulse',
+      description: 'Emit a structured status update (Pulse) at milestones. Report progress, ask questions, or signal completion. User-relevant pulses (questions, errors, blockers, done) are automatically surfaced to the user via Ben.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agent: { type: 'string', description: 'Your agent name' },
+          phase: { type: 'string', enum: ['starting', 'analyzing', 'implementing', 'testing', 'reviewing', 'done', 'blocked'], description: 'Current phase' },
+          status: { type: 'string', enum: ['ok', 'warning', 'error'], description: 'Status level' },
+          progressPct: { type: 'number', description: 'Progress percentage (0-100)' },
+          summary: { type: 'string', description: 'Brief summary of what happened' },
+          blockers: { type: 'array', items: { type: 'string' }, description: 'List of blockers' },
+          questionsForUser: { type: 'array', items: { type: 'string' }, description: 'Questions that need user input' },
+          artifacts: { type: 'array', items: { type: 'string' }, description: 'Files or outputs produced' },
+          nextStep: { type: 'string', description: 'What you will do next' },
+        },
+        required: ['agent', 'phase', 'status', 'progressPct', 'summary'],
+      },
+      handler: async (args) => {
+        const recordFn = this.pulseRecordGetter?.();
+        if (!recordFn) {
+          return {
+            textResultForLlm: 'Pulse recorded (no collector active)',
+            resultType: 'success' as const,
+          };
+        }
+        const filter = recordFn(args);
+        return {
+          textResultForLlm: `Pulse recorded: [${args.agent}] ${args.phase} ${args.progressPct}% — ${filter.userRelevant ? '(user-relevant: ' + filter.reason + ')' : '(internal)'}`,
+          resultType: 'success' as const,
+        };
+      },
+    });
+    this.tools.set('squad_pulse', squadPulse);
+
+    // squad_scratchpad_write: Write to shared scratchpad
+    const squadScratchpadWrite = defineTool<ScratchpadWriteRequest>({
+      name: 'squad_scratchpad_write',
+      description: 'Write a value to the shared scratchpad. Any agent can read values written by any other agent. Cleared between runs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: 'Key for the artifact (recommended format: agent:name)' },
+          value: { type: 'string', description: 'Value to store' },
+          producer: { type: 'string', description: 'Agent name writing the artifact' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Optional tags for filtering' },
+        },
+        required: ['key', 'value', 'producer'],
+      },
+      handler: async (args) => {
+        const pad = this.scratchpadGetter?.();
+        if (!pad) {
+          return {
+            textResultForLlm: 'Scratchpad not available — server not connected.',
+            resultType: 'failure' as const,
+            error: 'No scratchpad available',
+          };
+        }
+        const result = pad.write(args.key, args.value, args.producer, args.tags ?? []);
+        if (!result.success) {
+          return {
+            textResultForLlm: `Scratchpad write failed: ${result.error}`,
+            resultType: 'failure' as const,
+            error: result.error,
+          };
+        }
+        return {
+          textResultForLlm: `Scratchpad: ${result.created ? 'created' : 'updated'} key "${args.key}" (${args.value.length} chars)`,
+          resultType: 'success' as const,
+        };
+      },
+    });
+    this.tools.set('squad_scratchpad_write', squadScratchpadWrite);
+
+    // squad_scratchpad_read: Read from shared scratchpad
+    const squadScratchpadRead = defineTool<ScratchpadReadRequest>({
+      name: 'squad_scratchpad_read',
+      description: 'Read a value from the shared scratchpad by key. Returns the value and metadata.',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: 'Key to read' },
+        },
+        required: ['key'],
+      },
+      handler: async (args) => {
+        const pad = this.scratchpadGetter?.();
+        if (!pad) {
+          return {
+            textResultForLlm: 'Scratchpad not available — server not connected.',
+            resultType: 'failure' as const,
+            error: 'No scratchpad available',
+          };
+        }
+        const entry = pad.read(args.key);
+        if (!entry) {
+          return {
+            textResultForLlm: `Scratchpad: key "${args.key}" not found.`,
+            resultType: 'success' as const,
+          };
+        }
+        return {
+          textResultForLlm: `Scratchpad [${entry.key}] by ${entry.producer} (${entry.updatedAt}):\n${entry.value}`,
+          resultType: 'success' as const,
+        };
+      },
+    });
+    this.tools.set('squad_scratchpad_read', squadScratchpadRead);
+
+    // squad_scratchpad_list: List scratchpad entries
+    const squadScratchpadList = defineTool<ScratchpadListRequest>({
+      name: 'squad_scratchpad_list',
+      description: 'List all keys in the shared scratchpad. Optionally filter by producer agent or tag.',
+      parameters: {
+        type: 'object',
+        properties: {
+          producer: { type: 'string', description: 'Filter by producer agent' },
+          tag: { type: 'string', description: 'Filter by tag' },
+        },
+      },
+      handler: async (args) => {
+        const pad = this.scratchpadGetter?.();
+        if (!pad) {
+          return {
+            textResultForLlm: 'Scratchpad not available — server not connected.',
+            resultType: 'failure' as const,
+            error: 'No scratchpad available',
+          };
+        }
+        const entries = pad.list(args);
+        if (entries.length === 0) {
+          const filterDesc = args.producer || args.tag
+            ? ` (filter: ${[args.producer && `producer=${args.producer}`, args.tag && `tag=${args.tag}`].filter(Boolean).join(', ')})`
+            : '';
+          return {
+            textResultForLlm: `Scratchpad is empty${filterDesc}.`,
+            resultType: 'success' as const,
+          };
+        }
+        const stats = pad.stats();
+        const listing = entries.map(e =>
+          `- ${e.key} (by ${e.producer}, ${e.value.length} chars${e.tags.length > 0 ? `, tags: ${e.tags.join(',')}` : ''})`,
+        ).join('\n');
+        return {
+          textResultForLlm: `Scratchpad: ${stats.entryCount} entries, ${stats.totalSize} chars total\n${listing}`,
+          resultType: 'success' as const,
+        };
+      },
+    });
+    this.tools.set('squad_scratchpad_list', squadScratchpadList);
+
+    // squad_proposals: Manage improvement proposals from Sage
+    const squadProposals = defineTool<ProposalActionRequest>({
       name: 'squad_proposals',
-      description: 'Manage improvement proposals. Create proposals from analysis, list pending proposals, update (approve/reject), or apply proposals. Proposals are stored as markdown files in .squad/proposals/.',
+      description: 'Manage improvement proposals. Create proposals from Sage analysis, list pending proposals, or approve/reject them. Proposals are stored as markdown files in .squad/proposals/.',
       parameters: {
         type: 'object',
         properties: {
           operation: {
             type: 'string',
-            enum: ['create', 'list', 'update', 'apply'],
-            description: 'Operation to perform',
+            enum: ['create', 'list', 'update'],
+            description: 'Operation to perform: create a new proposal, list existing proposals, or update (approve/reject) a proposal',
           },
           proposal: {
             type: 'object',
             description: 'Proposal data (required for create operation)',
             properties: {
               title: { type: 'string', description: 'Proposal title' },
-              category: { type: 'string', enum: ['charter', 'routing', 'sdk-config', 'skill', 'workflow'] },
-              targetFile: { type: 'string', description: 'Target file this proposal affects' },
-              description: { type: 'string', description: 'Detailed description' },
-              evidence: { type: 'string', description: 'Evidence or rationale' },
-              priority: { type: 'string', enum: ['low', 'medium', 'high'] },
+              category: { type: 'string', description: 'Category (e.g. performance, architecture, testing, documentation)' },
+              targetFile: { type: 'string', description: 'Target file or module this proposal affects' },
+              description: { type: 'string', description: 'Detailed description of the proposed improvement' },
+              evidence: { type: 'string', description: 'Evidence or rationale supporting this proposal' },
+              priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'], description: 'Priority level' },
+              author: { type: 'string', description: 'Author agent name (defaults to Sage)' },
             },
             required: ['title', 'category', 'targetFile', 'description', 'evidence', 'priority'],
           },
-          statusFilter: { type: 'string', enum: ['pending', 'approved', 'rejected', 'applied'] },
-          proposalFile: { type: 'string', description: 'Proposal filename for update/apply' },
-          newStatus: { type: 'string', enum: ['approved', 'rejected'] },
-          reviewComment: { type: 'string', description: 'Reviewer comment' },
+          statusFilter: {
+            type: 'string',
+            enum: ['pending', 'approved', 'rejected'],
+            description: 'Filter proposals by status (default: pending). Used with list operation.',
+          },
+          proposalFile: {
+            type: 'string',
+            description: 'Proposal filename to update (required for update operation)',
+          },
+          newStatus: {
+            type: 'string',
+            enum: ['approved', 'rejected'],
+            description: 'New status for the proposal (required for update operation)',
+          },
+          reviewComment: {
+            type: 'string',
+            description: 'Optional reviewer comment when approving/rejecting',
+          },
         },
         required: ['operation'],
       },
       handler: async (args) => {
-        try {
-          const proposalDir = path.join(this.squadRoot, 'proposals');
+        const proposalsDir = path.join(this.squadRoot, '.squad', 'proposals');
 
-          switch (args.operation) {
-            case 'create': {
-              if (!args.proposal) {
-                return { textResultForLlm: 'Error: proposal data is required for create operation', resultType: 'failure', error: 'Missing proposal' };
-              }
-              const p = args.proposal;
-              const validCategories = ['charter', 'routing', 'sdk-config', 'skill', 'workflow'];
-              const validPriorities = ['low', 'medium', 'high'];
-              if (!validCategories.includes(p.category)) {
-                return { textResultForLlm: `Error: Invalid category "${p.category}"`, resultType: 'failure', error: 'Invalid category' };
-              }
-              if (!validPriorities.includes(p.priority)) {
-                return { textResultForLlm: `Error: Invalid priority "${p.priority}"`, resultType: 'failure', error: 'Invalid priority' };
-              }
-
-              const proposal: PipelineProposal = {
-                category: p.category as PipelineCategory,
-                targetFile: p.targetFile,
-                title: p.title,
-                description: p.description,
-                expectedImpact: p.description,
-                priority: p.priority as PipelinePriority,
-                evidence: [p.evidence],
-              };
-              const classified = classifyProposalRisk(proposal);
-              const record = createProposalRecord(classified);
-              fs.mkdirSync(proposalDir, { recursive: true });
-              const filename = `${record.id}.md`;
-              fs.writeFileSync(path.join(proposalDir, filename), formatProposalMarkdown(record), 'utf-8');
+        switch (args.operation) {
+          case 'create': {
+            if (!args.proposal) {
               return {
-                textResultForLlm: `Proposal created: ${filename}\nRisk level: ${classified.riskLevel} — ${classified.riskReason}`,
-                resultType: 'success',
-                toolTelemetry: { proposalId: record.id, riskLevel: classified.riskLevel, filename },
+                textResultForLlm: 'Error: proposal data is required for create operation',
+                resultType: 'failure' as const,
+                error: 'Missing proposal data',
+              };
+            }
+            const p = args.proposal;
+            if (!p.title || !p.category || !p.targetFile || !p.description || !p.evidence || !p.priority) {
+              return {
+                textResultForLlm: 'Error: proposal requires title, category, targetFile, description, evidence, and priority',
+                resultType: 'failure' as const,
+                error: 'Incomplete proposal data',
               };
             }
 
-            case 'list': {
-              const statusFilter = args.statusFilter ?? 'pending';
-              fs.mkdirSync(proposalDir, { recursive: true });
-              const appliedDir = path.join(proposalDir, 'applied');
-              let files: string[] = [];
-              try {
-                files = statusFilter === 'applied'
-                  ? fs.readdirSync(appliedDir).filter(f => f.endsWith('.md'))
-                  : fs.readdirSync(proposalDir).filter(f => f.endsWith('.md'));
-              } catch { /* dir may not exist */ }
+            fs.mkdirSync(proposalsDir, { recursive: true });
 
-              const matching: string[] = [];
-              const dir = statusFilter === 'applied' ? appliedDir : proposalDir;
-              for (const file of files) {
-                try {
-                  const content = fs.readFileSync(path.join(dir, file), 'utf-8');
-                  const statusMatch = content.match(/\*\*Status:\*\*\s*(\w+)/);
-                  if ((statusMatch?.[1]?.toLowerCase() ?? 'pending') === statusFilter) {
-                    const titleMatch = content.match(/^#\s+(.+)$/m);
-                    matching.push(`- ${file}: ${titleMatch?.[1] ?? file}`);
-                  }
-                } catch { /* skip */ }
-              }
-              return {
-                textResultForLlm: matching.length > 0
-                  ? `Found ${matching.length} ${statusFilter} proposal(s):\n${matching.join('\n')}`
-                  : `No ${statusFilter} proposals found.`,
-                resultType: 'success',
-                toolTelemetry: { statusFilter, count: matching.length },
-              };
-            }
+            const timestamp = new Date().toISOString();
+            const fileTimestamp = timestamp.replace(/[:.]/g, '-').slice(0, 19);
+            const slug = p.title
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '-')
+              .replace(/^-|-$/g, '')
+              .slice(0, 50);
+            const filename = `${fileTimestamp}-${slug}.md`;
+            const filepath = path.join(proposalsDir, filename);
+            const author = p.author || 'Sage';
 
-            case 'update': {
-              if (!args.proposalFile) {
-                return { textResultForLlm: 'Error: proposalFile is required', resultType: 'failure', error: 'Missing proposalFile' };
-              }
-              if (!args.newStatus || !['approved', 'rejected'].includes(args.newStatus)) {
-                return { textResultForLlm: 'Error: newStatus must be "approved" or "rejected"', resultType: 'failure', error: 'Invalid newStatus' };
-              }
-              const filePath = path.join(proposalDir, args.proposalFile);
-              if (!fs.existsSync(filePath)) {
-                return { textResultForLlm: `Error: Proposal file not found: ${args.proposalFile}`, resultType: 'failure', error: 'File not found' };
-              }
-              let content = fs.readFileSync(filePath, 'utf-8');
-              content = content.replace(/\*\*Status:\*\*\s*\w+/, `**Status:** ${args.newStatus}`);
-              if (args.reviewComment) {
-                content += `\n## Review\n\n${args.reviewComment}\n`;
-              }
-              fs.writeFileSync(filePath, content, 'utf-8');
-              return {
-                textResultForLlm: `Proposal ${args.proposalFile} updated to "${args.newStatus}"`,
-                resultType: 'success',
-                toolTelemetry: { proposalFile: args.proposalFile, newStatus: args.newStatus },
-              };
-            }
+            const content = [
+              `# ${p.title}`,
+              '',
+              `| Field | Value |`,
+              `|-------|-------|`,
+              `| **Status** | pending |`,
+              `| **Category** | ${p.category} |`,
+              `| **Priority** | ${p.priority} |`,
+              `| **Target File** | ${p.targetFile} |`,
+              `| **Author** | ${author} |`,
+              `| **Created** | ${timestamp} |`,
+              '',
+              `## Description`,
+              '',
+              p.description,
+              '',
+              `## Evidence`,
+              '',
+              p.evidence,
+              '',
+            ].join('\n');
 
-            case 'apply': {
-              if (!args.proposalFile) {
-                return { textResultForLlm: 'Error: proposalFile is required', resultType: 'failure', error: 'Missing proposalFile' };
-              }
-              const filePath = path.join(proposalDir, args.proposalFile);
-              if (!fs.existsSync(filePath)) {
-                return { textResultForLlm: `Error: Proposal file not found: ${args.proposalFile}`, resultType: 'failure', error: 'File not found' };
-              }
-              const content = fs.readFileSync(filePath, 'utf-8');
-              const titleMatch = content.match(/^#\s+(.+)$/m);
-              const categoryMatch = content.match(/\*\*Category:\*\*\s*(\w[\w-]*)/);
-              const priorityMatch = content.match(/\*\*Priority:\*\*\s*(\w+)/);
-              const targetMatch = content.match(/\*\*Target:\*\*\s*(.+)$/m);
-              const descMatch = content.match(/## Description\s*\n\s*\n([\s\S]*?)(?=\n## )/);
+            fs.writeFileSync(filepath, content, 'utf-8');
 
-              const proposal: PipelineProposal = {
-                title: titleMatch?.[1] ?? 'Unknown',
-                category: (categoryMatch?.[1] ?? 'charter') as PipelineCategory,
-                priority: (priorityMatch?.[1] ?? 'medium') as PipelinePriority,
-                targetFile: targetMatch?.[1]?.trim() ?? '',
-                description: descMatch?.[1]?.trim() ?? '',
-                expectedImpact: '',
-                evidence: [],
-              };
-              const classified = classifyProposalRisk(proposal);
-              const record = createProposalRecord(classified, args.proposalFile.replace('.md', ''));
-              const repoRoot = path.dirname(this.squadRoot);
-              const applyResult = autoApplyProposal(record, repoRoot);
-              if (applyResult.applied) {
-                saveAppliedRecord(record, applyResult, repoRoot);
-                recordApplicationForTracking(repoRoot, record);
-                const updatedContent = content.replace(/\*\*Status:\*\*\s*\w+/, '**Status:** applied');
-                fs.writeFileSync(filePath, updatedContent, 'utf-8');
-              }
-              return {
-                textResultForLlm: applyResult.applied
-                  ? `Proposal "${proposal.title}" applied to ${proposal.targetFile}`
-                  : `Not applied: ${applyResult.reason}`,
-                resultType: applyResult.applied ? 'success' : 'failure',
-                toolTelemetry: { proposalFile: args.proposalFile, applied: applyResult.applied },
-              };
-            }
-
-            default:
-              return { textResultForLlm: `Unknown operation: ${args.operation}`, resultType: 'failure', error: 'Unknown operation' };
+            return {
+              textResultForLlm: `Proposal created: ${filename} — "${p.title}" (${p.priority} priority, ${p.category})`,
+              resultType: 'success' as const,
+              toolTelemetry: { filename, title: p.title, category: p.category, priority: p.priority, author },
+            };
           }
-        } catch (error) {
-          return {
-            textResultForLlm: `Failed to ${args.operation} proposal: ${sanitizeErrorForLlm(error, this.squadRoot)}`,
-            resultType: 'failure',
-            error: String(error),
-          };
+
+          case 'list': {
+            if (!fs.existsSync(proposalsDir)) {
+              return {
+                textResultForLlm: 'No proposals found. The .squad/proposals/ directory does not exist yet.',
+                resultType: 'success' as const,
+              };
+            }
+
+            const files = fs.readdirSync(proposalsDir).filter(f => f.endsWith('.md'));
+            if (files.length === 0) {
+              return {
+                textResultForLlm: 'No proposals found in .squad/proposals/.',
+                resultType: 'success' as const,
+              };
+            }
+
+            const statusFilter = args.statusFilter || 'pending';
+            const proposals: { file: string; title: string; status: string; priority: string; category: string; targetFile: string }[] = [];
+
+            for (const file of files) {
+              const content = fs.readFileSync(path.join(proposalsDir, file), 'utf-8');
+              const statusMatch = content.match(/\|\s*\*\*Status\*\*\s*\|\s*(\w+)\s*\|/);
+              const status = statusMatch?.[1] ?? 'unknown';
+              if (status !== statusFilter) continue;
+
+              const titleMatch = content.match(/^#\s+(.+)$/m);
+              const priorityMatch = content.match(/\|\s*\*\*Priority\*\*\s*\|\s*(\w+)\s*\|/);
+              const categoryMatch = content.match(/\|\s*\*\*Category\*\*\s*\|\s*([^|]+)\s*\|/);
+              const targetMatch = content.match(/\|\s*\*\*Target File\*\*\s*\|\s*([^|]+)\s*\|/);
+
+              proposals.push({
+                file,
+                title: titleMatch?.[1]?.trim() ?? file,
+                status,
+                priority: priorityMatch?.[1]?.trim() ?? 'unknown',
+                category: categoryMatch?.[1]?.trim() ?? 'unknown',
+                targetFile: targetMatch?.[1]?.trim() ?? 'unknown',
+              });
+            }
+
+            if (proposals.length === 0) {
+              return {
+                textResultForLlm: `No ${statusFilter} proposals found. ${files.length} total proposals in .squad/proposals/.`,
+                resultType: 'success' as const,
+              };
+            }
+
+            const listing = proposals.map(p =>
+              `- **${p.title}** [${p.priority}] (${p.category}) → ${p.targetFile}\n  File: ${p.file}`,
+            ).join('\n');
+
+            return {
+              textResultForLlm: `${proposals.length} ${statusFilter} proposal(s):\n\n${listing}`,
+              resultType: 'success' as const,
+              toolTelemetry: { count: proposals.length, statusFilter },
+            };
+          }
+
+          case 'update': {
+            if (!args.proposalFile) {
+              return {
+                textResultForLlm: 'Error: proposalFile is required for update operation',
+                resultType: 'failure' as const,
+                error: 'Missing proposalFile',
+              };
+            }
+            if (!args.newStatus || (args.newStatus !== 'approved' && args.newStatus !== 'rejected')) {
+              return {
+                textResultForLlm: 'Error: newStatus must be "approved" or "rejected"',
+                resultType: 'failure' as const,
+                error: 'Invalid newStatus',
+              };
+            }
+
+            const filepath = path.join(proposalsDir, args.proposalFile);
+            if (!fs.existsSync(filepath)) {
+              return {
+                textResultForLlm: `Error: Proposal file not found: ${args.proposalFile}`,
+                resultType: 'failure' as const,
+                error: 'Proposal file not found',
+              };
+            }
+
+            let content = fs.readFileSync(filepath, 'utf-8');
+
+            // Update the status field in the metadata table
+            content = content.replace(
+              /(\|\s*\*\*Status\*\*\s*\|\s*)\w+(\s*\|)/,
+              `$1${args.newStatus}$2`,
+            );
+
+            // Append review section
+            const reviewTimestamp = new Date().toISOString();
+            const reviewSection = [
+              '',
+              `## Review`,
+              '',
+              `| Field | Value |`,
+              `|-------|-------|`,
+              `| **Decision** | ${args.newStatus} |`,
+              `| **Reviewed** | ${reviewTimestamp} |`,
+              args.reviewComment ? `| **Comment** | ${args.reviewComment} |` : '',
+              '',
+            ].filter(Boolean).join('\n');
+
+            content += reviewSection;
+            fs.writeFileSync(filepath, content, 'utf-8');
+
+            return {
+              textResultForLlm: `Proposal ${args.newStatus}: ${args.proposalFile}${args.reviewComment ? ` — "${args.reviewComment}"` : ''}`,
+              resultType: 'success' as const,
+              toolTelemetry: { proposalFile: args.proposalFile, newStatus: args.newStatus },
+            };
+          }
+
+          default:
+            return {
+              textResultForLlm: `Error: Unknown operation "${args.operation}". Use "create", "list", or "update".`,
+              resultType: 'failure' as const,
+              error: `Unknown operation: ${args.operation}`,
+            };
         }
       },
     });
-
-    // squad_handoff: Agent-to-agent delegation
-    const squadHandoff = defineTool<HandoffRequest>({
-      name: 'squad_handoff',
-      description: 'Delegate a sub-task to another agent in the squad. The handoff routes through the coordinator for governance. Supports circular delegation detection and depth limits.',
-      parameters: {
-        type: 'object',
-        properties: {
-          toAgent: {
-            type: 'string',
-            description: 'Name of the agent to delegate the sub-task to',
-          },
-          task: {
-            type: 'string',
-            description: 'Description of the sub-task for the target agent',
-          },
-          context: {
-            type: 'string',
-            description: 'Additional context to pass to the target agent',
-          },
-          waitForResult: {
-            type: 'boolean',
-            description: 'Wait for the target agent to complete the task (default: true)',
-            default: true,
-          },
-          priority: {
-            type: 'string',
-            enum: ['low', 'normal', 'high', 'critical'],
-            description: 'Priority level for the delegated task',
-            default: 'normal',
-          },
-        },
-        required: ['toAgent', 'task'],
-      },
-      handler: async (args) => {
-        // Validate target agent
-        if (!args.toAgent || args.toAgent.trim() === '') {
-          return {
-            textResultForLlm: 'Error: Target agent name is required',
-            resultType: 'failure',
-            error: 'Invalid target agent',
-          };
-        }
-
-        // Check if handoff manager is available
-        if (!this.handoffManager) {
-          return {
-            textResultForLlm: 'Error: Handoff manager not initialized. Agent-to-agent delegation is not available.',
-            resultType: 'failure',
-            error: 'No handoff manager',
-          };
-        }
-
-        // For now, return a success message indicating the handoff would be processed
-        // The actual coordination with the session pool will be wired when integrated
-        const waitForResult = args.waitForResult ?? true;
-        return {
-          textResultForLlm: `Handoff request created: ${args.toAgent} will handle "${args.task}". ${waitForResult ? 'Waiting for result...' : 'Fire-and-forget mode.'}`,
-          resultType: 'success',
-          toolTelemetry: {
-            toAgent: args.toAgent,
-            task: args.task,
-            waitForResult,
-            priority: args.priority || 'normal',
-          },
-        };
-      },
-    });
-
-    // Register all tools
-    this.tools.set('squad_route', squadRoute);
-    this.tools.set('squad_decide', squadDecide);
-    this.tools.set('squad_memory', squadMemory);
-    this.tools.set('squad_status', squadStatus);
-    this.tools.set('squad_skill', squadSkill);
     this.tools.set('squad_proposals', squadProposals);
-    this.tools.set('squad_handoff', squadHandoff);
   }
 
   /** Get all registered tools for session config */
@@ -963,20 +1203,8 @@ export class ToolRegistry {
     return this.tools.get(name);
   }
 
-  /**
-   * Replace built-in tool handlers with skill-backed versions.
-   * Called post-construction after SkillScriptLoader has resolved handlers.
-   * Only replaces tools that already exist — unknown tool names are silently ignored.
-   * Once applied, handlers are immutable for the session.
-   *
-   * Skill handlers are already OTel-wrapped by SkillScriptLoader.load() — no re-wrapping here.
-   */
-  applySkillHandlers(tools: SquadTool<any>[]): void {
-    for (const tool of tools) {
-      if (this.tools.has(tool.name)) {
-        this.tools.set(tool.name, tool);
-      }
-      // Unknown tool names silently ignored — skills cannot introduce new tools
-    }
+  /** Register an external tool (e.g., from MCP bridge) */
+  registerTool(tool: SquadTool<any>): void {
+    this.tools.set(tool.name, tool);
   }
 }

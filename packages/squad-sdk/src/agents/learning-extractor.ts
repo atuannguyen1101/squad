@@ -9,19 +9,12 @@
  * instead of a single summary string.
  */
 
-// Type imports from missing source files
-export interface SessionMessage {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  timestamp?: string;
-}
+import type { SessionMessage } from '../server/agent-lifecycle.js';
+import type { Pulse } from '../pulse/pulse.js';
 
-export interface Pulse {
-  agent: string;
-  summary: string;
-  blockers: string[];
-  artifacts: string[];
-}
+// ============================================================================
+// Types
+// ============================================================================
 
 export interface LearningExtraction {
   /** Key things discovered during the session */
@@ -50,12 +43,12 @@ export interface LearningExtractionOptions {
 // ============================================================================
 
 const PATTERNS = {
-  decisions: /\b(?:decided|decision|agreed|confirmed|approved|rejected|chose|chosen|selected)\b|\bwent with\b|\bopted for\b/i,
-  errors: /\b(?:error|failed|failure|exception|bug|crash|broken|fix|fixed|resolved|issue|problem|workaround)\b/i,
-  artifacts: /\b(?:created|wrote|generated|built|deployed|published|committed|implemented|added|produced)\b/i,
-  patterns: /\b(?:pattern|convention|approach|always|never|prefer|standard|rule|practice|recurring|consistently)\b/i,
-  learnings: /\b(?:learned|discovered|realized|found out|turns out|important|note|remember|key insight|takeaway|TIL)\b/i,
-};
+  decisions: /(?:decided|decision|agreed|confirmed|approved|rejected|chose|chosen|went with|opted for|selected)/i,
+  errors: /(?:error|failed|failure|exception|bug|crash|broken|fix|fixed|resolved|issue|problem|workaround)/i,
+  artifacts: /(?:created|wrote|generated|built|deployed|published|committed|implemented|added|produced)/i,
+  patterns: /(?:pattern|convention|approach|always|never|prefer|standard|rule|practice|recurring|consistently)/i,
+  learnings: /(?:learned|discovered|realized|found out|turns out|important|note|remember|key insight|takeaway|TIL)/i,
+} as const;
 
 // ============================================================================
 // Implementation
@@ -133,41 +126,36 @@ export function extractLearnings(
     return emptyExtraction(summary);
   }
 
-  const extracted = {
-    learnings: [] as string[],
-    decisions: [] as string[],
-    patterns: [] as string[],
-    issues: [] as string[],
+  const extracted: Record<string, string[]> = {
+    learnings: [],
+    decisions: [],
+    patterns: [],
+    issues: [],
   };
+
   const artifacts: string[] = [];
 
   // Scan messages for high-signal content
   for (const msg of messages) {
-    const lines = msg.content.split('\n').filter((l: string) => l.trim().length > 0);
-
+    const lines = msg.content.split('\n').filter(l => l.trim().length > 0);
     for (const line of lines) {
       const trimmed = line.trim();
-
       // Skip lines that are too short or too long to be meaningful
       if (trimmed.length < 10 || trimmed.length > 500) continue;
 
       // Categorize into sections based on pattern matching
-      if (PATTERNS.decisions.test(trimmed) && extracted['decisions'].length < 5) {
-        extracted['decisions'].push(`- ${trimmed.slice(0, 200)}`);
+      if (PATTERNS.decisions.test(trimmed) && extracted['decisions']!.length < 5) {
+        extracted['decisions']!.push(`- ${trimmed.slice(0, 200)}`);
       }
-
-      if (PATTERNS.errors.test(trimmed) && extracted['issues'].length < 5) {
-        extracted['issues'].push(`- ${trimmed.slice(0, 200)}`);
+      if (PATTERNS.errors.test(trimmed) && extracted['issues']!.length < 5) {
+        extracted['issues']!.push(`- ${trimmed.slice(0, 200)}`);
       }
-
-      if (PATTERNS.patterns.test(trimmed) && extracted['patterns'].length < 5) {
-        extracted['patterns'].push(`- ${trimmed.slice(0, 200)}`);
+      if (PATTERNS.patterns.test(trimmed) && extracted['patterns']!.length < 5) {
+        extracted['patterns']!.push(`- ${trimmed.slice(0, 200)}`);
       }
-
-      if (PATTERNS.learnings.test(trimmed) && extracted['learnings'].length < 5) {
-        extracted['learnings'].push(`- ${trimmed.slice(0, 200)}`);
+      if (PATTERNS.learnings.test(trimmed) && extracted['learnings']!.length < 5) {
+        extracted['learnings']!.push(`- ${trimmed.slice(0, 200)}`);
       }
-
       if (PATTERNS.artifacts.test(trimmed) && artifacts.length < 10) {
         artifacts.push(trimmed.slice(0, 200));
       }
@@ -182,10 +170,9 @@ export function extractLearnings(
           artifacts.push(artifact);
         }
       }
-
       for (const blocker of pulse.blockers) {
-        if (extracted['issues'].length < 5) {
-          extracted['issues'].push(`- Blocker: ${blocker.slice(0, 200)}`);
+        if (extracted['issues']!.length < 5) {
+          extracted['issues']!.push(`- Blocker: ${blocker.slice(0, 200)}`);
         }
       }
     }
@@ -193,17 +180,17 @@ export function extractLearnings(
 
   // Build the extraction result
   return {
-    learnings: extracted['learnings'].length > 0
-      ? truncate(extracted['learnings'].join('\n'), maxLength)
+    learnings: extracted['learnings']!.length > 0
+      ? truncate(extracted['learnings']!.join('\n'), maxLength)
       : null,
-    decisions: extracted['decisions'].length > 0
-      ? truncate(extracted['decisions'].join('\n'), maxLength)
+    decisions: extracted['decisions']!.length > 0
+      ? truncate(extracted['decisions']!.join('\n'), maxLength)
       : null,
-    patterns: extracted['patterns'].length > 0
-      ? truncate(extracted['patterns'].join('\n'), maxLength)
+    patterns: extracted['patterns']!.length > 0
+      ? truncate(extracted['patterns']!.join('\n'), maxLength)
       : null,
-    issues: extracted['issues'].length > 0
-      ? truncate(extracted['issues'].join('\n'), maxLength)
+    issues: extracted['issues']!.length > 0
+      ? truncate(extracted['issues']!.join('\n'), maxLength)
       : null,
     artifacts,
     sessionSummary: summary,

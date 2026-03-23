@@ -2,12 +2,24 @@
  * Squad MCP Server
  *
  * Wraps SquadServer as an MCP stdio server. Copilot spawns this process
- * and discovers squad_dispatch, squad_status, squad_list_agents tools.
+ * and discovers squad_dispatch, squad_send, squad_read_session, squad_decide,
+ * squad_memory, squad_status, squad_list_agents, squad_close_session,
+ * squad_monitor, and squad_roster tools.
  */
 
 import { MCPServer } from './protocol.js';
 import { SquadServer, type SquadServerConfig } from '../server/index.js';
+import { TOOL_CALL_PLACEHOLDER } from '../server/agent-lifecycle.js';
 import type { SquadConfig } from '../runtime/config.js';
+import { createPulse, formatPulseForUser, type PulsePhase, type PulseStatus } from '../pulse/index.js';
+import { createEmptyIntentGraph, serializeIntentGraph, updateIntentGraph, parseUnderstandPhaseOutput, parseRoutePhaseOutput, type IntentGraph } from '../intent/index.js';
+import { PipelineRunner, parseRoutingDecision, generateImplPhases, isValidRoutingResponse, type PipelineDefinition, type PipelineRunnerDeps } from '../pipeline/index.js';
+import { analyzeRun, formatAnalysisReport, type SessionSnapshot } from './analyze-run.js';
+import { triggerAutoSageAnalysis } from './auto-sage.js';
+import { resolveDashboardPort, persistPort, clearPersistedPort } from './dashboard-port.js';
+import * as http from 'node:http';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 export interface SquadMCPServerOptions {
   /** Squad root directory */
@@ -44,6 +56,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
 
   let started = false;
   let serverStartTime = Date.now();
+  let dashboardUrl: string | null = null;
 
   // Lazy start — connect to Copilot on first dispatch
   async function ensureStarted(): Promise<void> {
@@ -137,10 +150,11 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             `Uptime: ${uptimeStr}`,
             `Active sessions: ${status.activeSessions}`,
             `Connected: ${status.connectedToHost}`,
+            dashboardUrl ? `Dashboard: ${dashboardUrl}` : null,
             `Events recorded: ${history.size}`,
             status.agents.length > 0 ? `Agents:\n${agentList}` : 'No active agents',
             `Recent activity:\n${recentSummary}`,
-          ].join('\n'),
+          ].filter(Boolean).join('\n'),
         }],
       };
     },
@@ -239,9 +253,261 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
     },
   );
 
+  // squad_roster: Discover available agents from .squad/agents/
+  mcp.addTool(
+    {
+      name: 'squad_roster',
+      description: 'List all available squad agents with their roles, expertise, and model preferences. Reads from .squad/agents/ charters. Use this to discover who is on the team before dispatching.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    async () => {
+      const agentsDir = path.join(options.squadRoot, '.squad', 'agents');
+      try {
+        const dirs = fs.readdirSync(agentsDir, { withFileTypes: true })
+          .filter((d: any) => d.isDirectory() && !d.name.startsWith('_'))
+          .map((d: any) => d.name as string);
+
+        const roster: string[] = [];
+        for (const name of dirs) {
+          const charterPath = path.join(agentsDir, name, 'charter.md');
+          try {
+            const content = fs.readFileSync(charterPath, 'utf-8');
+            const roleMatch = content.match(/^#\s+.+?\s*[-—]\s*(.+)/m)
+              || content.match(/\*\*Role:\*\*\s*(.+)/m)
+              || content.match(/Role:\s*(.+)/m);
+            const role = roleMatch?.[1]?.trim() ?? 'agent';
+
+            const expertiseMatch = content.match(/\*\*Expertise:\*\*\s*(.+)/m);
+            const expertise = expertiseMatch?.[1]?.trim() ?? '';
+
+            const modelMatch = content.match(/Preferred:\s*(.+)/m);
+            const model = modelMatch?.[1]?.trim() ?? 'auto';
+
+            roster.push(`  ${name}: ${role}${expertise ? ' | ' + expertise : ''}${model !== 'auto' ? ' [model: ' + model + ']' : ''}`);
+          } catch {
+            roster.push(`  ${name}: (no charter)`);
+          }
+        }
+
+        // Also read team.md for the full roster table if it exists
+        const teamPath = path.join(options.squadRoot, '.squad', 'team.md');
+        let teamInfo = '';
+        try {
+          const teamContent = fs.readFileSync(teamPath, 'utf-8');
+          const membersMatch = teamContent.match(/## Members[\s\S]*?(\|[\s\S]*?\|)/);
+          if (membersMatch) teamInfo = '\n\nTeam table from team.md:\n' + membersMatch[0].slice(0, 1000);
+        } catch { /* no team.md */ }
+
+        return {
+          content: [{
+            type: 'text',
+            text: roster.length > 0
+              ? `Available agents (${roster.length}):\n${roster.join('\n')}${teamInfo}`
+              : 'No agents found in .squad/agents/',
+          }],
+        };
+      } catch {
+        return {
+          content: [{ type: 'text', text: 'Could not read .squad/agents/ — is this a squad-enabled repo?' }],
+        };
+      }
+    },
+  );
+
   // --- Graceful shutdown ---
+
+  // squad_send: Send a message and wait for the agent's response
+  mcp.addTool(
+    {
+      name: 'squad_send',
+      description: 'Send a message to an existing agent session and wait for their response. Use this for synchronous back-and-forth communication between agents. The agent must already have an active session (created via squad_dispatch). Returns the agent\'s full response text.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentName: { type: 'string', description: 'Name of the target agent (must have an active session)' },
+          message: { type: 'string', description: 'The message to send to the agent' },
+        },
+        required: ['agentName', 'message'],
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      try {
+        const response = await mgr.sendFollowUp(args.agentName, args.message);
+        if (response) {
+          return {
+            content: [{ type: 'text', text: response }],
+          };
+        }
+        return {
+          content: [{ type: 'text', text: `Message sent to ${args.agentName} but no response captured (agent may still be processing). Use squad_read_session to check later.` }],
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text', text: `Failed to send to ${args.agentName}: ${msg}` }],
+        };
+      }
+    },
+  );
+
+  // squad_read_session: Read an agent's conversation history
+  mcp.addTool(
+    {
+      name: 'squad_read_session',
+      description: 'Read the conversation history of an agent session. Returns all messages (user dispatches and agent responses). Use this to check what an agent has done, read their output, or monitor progress.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentName: { type: 'string', description: 'Name of the agent whose session to read' },
+          lastN: { type: 'number', description: 'Only return the last N messages (default: all)' },
+        },
+        required: ['agentName'],
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      const messages = mgr.getMessages(args.agentName);
+      if (messages.length === 0) {
+        return {
+          content: [{ type: 'text', text: `No messages found for ${args.agentName}. Agent may not have an active session.` }],
+        };
+      }
+
+      const sliced = args.lastN ? messages.slice(-args.lastN) : messages;
+      const formatted = sliced.map((m, i) => {
+        const role = m.role === 'user' ? '→ SENT' : '← REPLY';
+        const ts = m.timestamp ? ` (${m.timestamp.slice(11, 19)})` : '';
+        const content = m.content.length > 4000
+          ? m.content.slice(0, 4000) + '\n... (truncated)'
+          : m.content;
+        return `[${i + 1}] ${role}${ts}:\n${content}`;
+      }).join('\n\n---\n\n');
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Session history for ${args.agentName} (${sliced.length}/${messages.length} messages):\n\n${formatted}`,
+        }],
+      };
+    },
+  );
+
+  // squad_decide: Record a team decision
+  mcp.addTool(
+    {
+      name: 'squad_decide',
+      description: 'Record a team decision to .squad/decisions/inbox/. Decisions are reviewed and merged into decisions.md by the team. Use this when making architectural, design, or process choices that affect other agents.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          author: { type: 'string', description: 'Agent name making the decision (e.g., "keaton")' },
+          summary: { type: 'string', description: 'Brief one-line summary of the decision' },
+          body: { type: 'string', description: 'Full decision details and rationale' },
+        },
+        required: ['author', 'summary', 'body'],
+      },
+    },
+    async (args) => {
+      try {
+        const inboxDir = path.resolve(options.squadRoot, '.squad', 'decisions', 'inbox');
+        fs.mkdirSync(inboxDir, { recursive: true });
+
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const slug = args.summary
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '')
+          .slice(0, 50);
+        const filename = path.join(inboxDir, `${args.author}-${slug}.md`);
+
+        const content = [
+          `### ${timestamp}: ${args.summary}`,
+          '',
+          `**By:** ${args.author}`,
+          `**What:** ${args.body}`,
+          '',
+        ].join('\n');
+
+        fs.writeFileSync(filename, content, 'utf-8');
+
+        return {
+          content: [{ type: 'text', text: `Decision recorded: ${filename}` }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `Failed to write decision: ${err instanceof Error ? err.message : err}` }],
+        };
+      }
+    },
+  );
+
+  // squad_memory: Append to agent history
+  mcp.addTool(
+    {
+      name: 'squad_memory',
+      description: 'Append an entry to an agent\'s history file (.squad/agents/{name}/history.md). Use to record learnings, session outcomes, or important context for future sessions.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agent: { type: 'string', description: 'Agent name whose history to update' },
+          section: { type: 'string', enum: ['learnings', 'updates', 'sessions'], description: 'Section to append to' },
+          content: { type: 'string', description: 'Content to append' },
+        },
+        required: ['agent', 'section', 'content'],
+      },
+    },
+    async (args) => {
+      try {
+        const historyFile = path.resolve(options.squadRoot, '.squad', 'agents', args.agent, 'history.md');
+
+        if (!fs.existsSync(historyFile)) {
+          return {
+            content: [{ type: 'text', text: `History file not found for ${args.agent}. File expected at: ${historyFile}` }],
+          };
+        }
+
+        const sectionHeader = `## ${args.section.charAt(0).toUpperCase() + args.section.slice(1)}`;
+        const timestamp = new Date().toISOString();
+        const entry = `\n### ${timestamp}\n${args.content}\n`;
+
+        let fileContent = fs.readFileSync(historyFile, 'utf-8');
+        const sectionIndex = fileContent.indexOf(sectionHeader);
+        if (sectionIndex !== -1) {
+          const nextSectionIndex = fileContent.indexOf('\n## ', sectionIndex + sectionHeader.length);
+          const insertIndex = nextSectionIndex === -1 ? fileContent.length : nextSectionIndex;
+          fileContent = fileContent.slice(0, insertIndex) + entry + fileContent.slice(insertIndex);
+        } else {
+          fileContent += `\n${sectionHeader}\n${entry}`;
+        }
+
+        fs.writeFileSync(historyFile, fileContent, 'utf-8');
+
+        return {
+          content: [{ type: 'text', text: `Appended to ${args.agent} history (${args.section})` }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `Failed to update history: ${err instanceof Error ? err.message : err}` }],
+        };
+      }
+    },
+  );
+
+  let dashServer: http.Server | null = null;
   const shutdown = async () => {
     process.stderr.write('[squad-mcp] Shutting down...\n');
+    clearPersistedPort(options.squadRoot);
+    if (dashServer) dashServer.close();
     if (started) {
       await server.stop();
     }
@@ -249,6 +515,906 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+
+  // --- Team Ben: Pulse Collector + Intent Graph state ---
+  const pulseCollector = server.getPulseCollector();
+  let activeIntentGraph: IntentGraph | null = null;
+  let pendingUserQuestions: string[] = [];
+  let waitResolvers: Array<(value: string) => void> = [];
+  let activePipelines: PipelineRunner[] = [];
+  let activeRunId: string | null = null;
+
+  pulseCollector.setOnUserRelevantPulse((pulse) => {
+    const questions = pulse.questionsForUser ?? [];
+    if (questions.length > 0) {
+      pendingUserQuestions.push(...questions);
+    }
+    const reason = questions.length > 0 ? 'question'
+      : pulse.phase === 'done' ? 'done'
+      : pulse.status === 'error' ? 'error'
+      : 'event';
+    for (const resolver of waitResolvers) {
+      resolver(reason);
+    }
+    waitResolvers = [];
+  });
+
+  // squad_run: Start a team run via Ben (user-facing entry point)
+  mcp.addTool(
+    {
+      name: 'squad_run',
+      description: 'Start a team run through Ben, your team representative. Ben will understand your request, ask clarifying questions if needed, and coordinate the team. This is the primary entry point for all work requests.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'What you want the team to do' },
+          context: { type: 'string', description: 'Optional additional context (e.g., relevant files, constraints)' },
+        },
+        required: ['message'],
+      },
+    },
+    async (args) => {
+      if (activeRunId) {
+        return {
+          content: [{
+            type: 'text',
+            text: `A run is already active (${activeRunId}). Use squad_cancel to stop it first, or squad_wait to monitor progress.`,
+          }],
+        };
+      }
+
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      const runId = `run-${Date.now()}`;
+      activeRunId = runId;
+      activeIntentGraph = createEmptyIntentGraph(args.message);
+      pulseCollector.clear();
+      server.getScratchpad().clear();
+      pendingUserQuestions = [];
+      activePipelines = [];
+
+      const contextAddendum = args.context
+        ? `\n\nAdditional context from user:\n${args.context}`
+        : '';
+
+      const agentsDir = path.join(options.squadRoot, '.squad', 'agents');
+      let agentRoster: { name: string; role: string }[] = [];
+      try {
+        const dirs = fs.readdirSync(agentsDir, { withFileTypes: true })
+          .filter((d: any) => d.isDirectory() && !d.name.startsWith('_'));
+        for (const d of dirs) {
+          const charterPath = path.join(agentsDir, d.name as string, 'charter.md');
+          try {
+            const content = fs.readFileSync(charterPath, 'utf-8');
+            const roleMatch = content.match(/\*\*Role:\*\*\s*(.+)/m)
+              || content.match(/Role:\s*(.+)/m)
+              || content.match(/^#\s+.+?\s*[-—]\s*(.+)/m);
+            agentRoster.push({ name: d.name as string, role: roleMatch?.[1]?.trim() ?? '' });
+          } catch { agentRoster.push({ name: d.name as string, role: '' }); }
+        }
+      } catch { /* no agents dir */ }
+
+      if (agentRoster.length === 0) {
+        return {
+          content: [{ type: 'text', text: 'No agents found. Create at least one agent with a charter in .squad/agents/ before running.' }],
+        };
+      }
+
+      let routingContext = '';
+      try {
+        const routingPath = path.join(options.squadRoot, '.squad', 'routing.md');
+        routingContext = fs.readFileSync(routingPath, 'utf-8');
+      } catch { /* no routing.md */ }
+
+      const rosterSummary = agentRoster.map(a => `- ${a.name}: ${a.role}`).join('\n');
+
+      const waitForResponse = async (agentName: string, timeoutMs: number): Promise<string | null> => {
+        let currentCount = mgr.getMessages(agentName).filter((m: any) => m.role === 'assistant').length;
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const msgs = mgr.getMessages(agentName);
+          const replies = msgs.filter((m: any) => m.role === 'assistant');
+          if (replies.length > currentCount) {
+            // If the agent asked questions via pulse, don't accept this reply yet.
+            // Wait for the user to respond (squad_respond clears pendingUserQuestions),
+            // then capture the agent's NEXT reply after Q&A resolution.
+            if (pendingUserQuestions.length > 0) {
+              currentCount = replies.length;
+              await new Promise(r => setTimeout(r, 3000));
+              continue;
+            }
+            return replies[replies.length - 1]?.content ?? null;
+          }
+          await new Promise(r => setTimeout(r, 3000));
+        }
+        return null;
+      };
+
+      const pipelineDeps: PipelineRunnerDeps = {
+        dispatch: async (agentName: string, task: string, context?: string) => {
+          const result = await server.dispatch(agentName, task, context);
+          // Grab the latest assistant reply captured by sendAndWait in dispatch
+          const msgs = mgr.getMessages(agentName);
+          const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
+          return {
+            sessionId: result.sessionId,
+            status: result.status,
+            agentName: result.agentName,
+            response: lastReply?.content ?? undefined,
+          };
+        },
+        waitForResponse,
+        onPhaseStart: (phaseId: string, agent: string) => {
+          pulseCollector.record(createPulse({
+            agent, phase: 'starting', status: 'ok', progressPct: 0,
+            summary: `Phase ${phaseId} starting`, blockers: [], questionsForUser: [],
+            artifacts: [], nextStep: phaseId,
+          }));
+        },
+        onPhaseComplete: (result) => {
+          pulseCollector.record(createPulse({
+            agent: result.agent,
+            phase: result.status === 'completed' ? 'done' : 'blocked',
+            status: result.status === 'completed' ? 'ok' : 'error',
+            progressPct: result.status === 'completed' ? 100 : 0,
+            summary: result.error ?? `Phase ${result.phaseId} completed`,
+            blockers: result.error ? [result.error] : [],
+            questionsForUser: [], artifacts: [], nextStep: '',
+          }));
+
+          // --- Intent Graph updates at key milestones ---
+          if (result.status === 'completed' && activeIntentGraph && typeof result.output === 'string') {
+            if (result.phaseId === 'understand') {
+              const updates = parseUnderstandPhaseOutput(result.output);
+              activeIntentGraph = updateIntentGraph(activeIntentGraph, updates);
+            } else if (result.phaseId === 'route') {
+              const updates = parseRoutePhaseOutput(result.output);
+              activeIntentGraph = updateIntentGraph(activeIntentGraph, updates);
+            }
+          }
+        },
+        onPipelineComplete: (state) => {
+          // Only emit a progress pulse here — this is the understand+route
+          // pipeline, NOT the full run.  The real "done" pulse is emitted
+          // after the impl+review pipeline finishes (see below).
+          pulseCollector.record(createPulse({
+            agent: 'ben', phase: state.status === 'completed' ? 'implementing' : 'blocked',
+            status: state.status === 'completed' ? 'ok' : 'error',
+            progressPct: state.status === 'completed' ? 30 : 100,
+            summary: state.status === 'completed'
+              ? 'Routing complete. Starting implementation pipeline.'
+              : 'Routing failed. Check phase results.',
+            blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
+          }));
+        },
+      };
+
+      const phases: import('../pipeline/types.js').PhaseDefinition[] = [
+        {
+          id: 'understand',
+          agent: 'ben',
+          task: [
+            'A user has a new request. Understand it deeply.',
+            'If anything is unclear, use squad_pulse with questionsForUser.',
+            'Respond with a clear summary of what needs to be done.',
+            'Do NOT dispatch to any agents. Just understand and summarize.',
+            '',
+            `User request: ${args.message}${contextAddendum}`,
+          ].join('\n'),
+          gate: {
+            validate: (o: unknown) => typeof o === 'string' && (o as string).length > 20,
+            description: 'Ben must produce a substantive understanding',
+          },
+          timeout: 120_000,
+        },
+        {
+          id: 'route',
+          agent: 'coordinator',
+          task: [
+            'Pick the best agents from this workspace roster to implement and review the following task.',
+            '',
+            `Task: ${args.message}${contextAddendum}`,
+            '',
+            'Available agents:',
+            rosterSummary,
+            '',
+            routingContext ? `Routing rules:\n${routingContext.slice(0, 2000)}` : 'No routing.md found.',
+            '',
+            'Respond with ONLY a JSON object, nothing else.',
+            '',
+            'For a simple task (single concern), use:',
+            '{"implementer": "agent_name", "reviewer": "agent_name", "architect": null}',
+            '',
+            'For a multi-part task with independent parts that different agents can handle in parallel, use:',
+            '{"subtasks": [{"agent": "agent_a", "task": "part 1 description"}, {"agent": "agent_b", "task": "part 2 description"}], "reviewer": "agent_name"}',
+            '',
+            'Pick the agent whose role best matches the task. If unsure, use the simple single-agent format.',
+          ].join('\n'),
+          dependsOn: ['understand'],
+          gate: {
+            validate: isValidRoutingResponse,
+            description: 'Coordinator must return valid JSON with implementer/reviewer or subtasks/reviewer',
+          },
+          timeout: 60_000,
+        },
+      ];
+
+      const pipelineDefinition: PipelineDefinition = {
+        id: runId,
+        name: 'Team Ben Run',
+        phases,
+      };
+
+      const pipeline = new PipelineRunner(pipelineDefinition, pipelineDeps);
+      activePipelines.push(pipeline);
+
+      pipeline.run().then(async (state) => {
+        const routeResult = state.phaseResults.get('route');
+        if (routeResult?.status !== 'completed' || !routeResult.output) return;
+
+        // --- Parse Coordinator response and generate implementation phases ---
+        const routingDecision = parseRoutingDecision(routeResult.output as string);
+        if (!routingDecision) return;
+
+        const revName = routingDecision.reviewer;
+
+        const implPhases = generateImplPhases(routingDecision, {
+          message: args.message,
+          contextAddendum,
+          toolCallPlaceholder: TOOL_CALL_PLACEHOLDER,
+          hasDonePulse: (agentName: string) => {
+            const agentPulses = pulseCollector.getByAgent(agentName);
+            return agentPulses.some(p => p.phase === 'done');
+          },
+          timeout: 300_000,
+        });
+
+        const implPipelineDeps: PipelineRunnerDeps = {
+          ...pipelineDeps,
+          dispatch: async (agentName: string, task: string, context?: string) => {
+            const result = await server.dispatch(agentName, task, context);
+            // sendAndWait returns on the FIRST response turn, but agents doing
+            // multi-step work (file edits, tests, builds) keep executing.
+            // Wait for the agent's "done" pulse before returning — this prevents
+            // the pipeline from evaluating the gate on a partial early response.
+            const donePulse = await pulseCollector.waitForDonePulse(
+              agentName,
+              (implPhases.find(p => p.agent === agentName)?.timeout ?? 300_000) - 5_000,
+            );
+            // After the done pulse (or timeout), grab the latest assistant reply
+            const msgs = mgr.getMessages(agentName);
+            const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
+            return {
+              sessionId: result.sessionId,
+              status: result.status,
+              agentName: result.agentName,
+              response: lastReply?.content ?? (donePulse?.summary ?? undefined),
+            };
+          },
+        };
+
+        const implPipeline = new PipelineRunner(
+          { id: `impl-${Date.now()}`, name: 'Implementation', phases: implPhases },
+          implPipelineDeps,
+        );
+        activePipelines.push(implPipeline);
+        const implState = await implPipeline.run();
+
+        // Emit the REAL "Pipeline complete" pulse — all four phases
+        // (understand, route, implement, review) have now finished.
+        // This is the signal that squad_wait should wake on.
+        pulseCollector.record(createPulse({
+          agent: 'ben', phase: implState.status === 'completed' ? 'done' : 'blocked',
+          status: implState.status === 'completed' ? 'ok' : 'error',
+          progressPct: 100,
+          summary: implState.status === 'completed'
+            ? 'Pipeline complete. All phases passed.'
+            : 'Pipeline failed. Check phase results.',
+          blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
+        }));
+
+        // Auto-Sage: fire-and-forget post-processing after pipeline completion.
+        // Runs AFTER the "done" pulse so squad_wait is not blocked.
+        const autoAnalyze = options.squadConfig?.autoAnalyze ?? false;
+        process.stderr.write(`[squad] auto-sage: autoAnalyze=${String(autoAnalyze)}, pipelineStatus=${implState.status}\n`);
+        if (implState.status === 'completed' && autoAnalyze) {
+          const autoMgr = server.getSessionManager();
+          if (!autoMgr) {
+            process.stderr.write('[squad] auto-sage: skipped — session manager unavailable\n');
+          } else {
+            triggerAutoSageAnalysis({
+              pulseCollector,
+              listActiveSessions: () => autoMgr.listActiveSessions(),
+              getMessages: (agentName: string) => autoMgr.getMessages(agentName),
+              dispatch: async (agentName: string, message: string, context?: string) => {
+                const result = await server.dispatch(agentName, message, context);
+                const msgs = autoMgr.getMessages(agentName);
+                const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
+                return { response: lastReply?.content ?? undefined };
+              },
+              squadRoot: options.squadRoot,
+            }).catch((err: unknown) => {
+              // Auto-analysis errors are non-fatal but must not be silent
+              process.stderr.write(`[squad] auto-sage: triggerAutoSageAnalysis failed: ${err instanceof Error ? err.message : String(err)}\n`);
+            });
+          }
+        }
+      }).catch((err) => {
+        pulseCollector.record(createPulse({
+          agent: 'ben', phase: 'blocked', status: 'error', progressPct: 100,
+          summary: `Pipeline failed: ${err instanceof Error ? err.message : String(err)}`,
+          blockers: [String(err)], questionsForUser: [], artifacts: [], nextStep: '',
+        }));
+      }).finally(() => {
+        activeRunId = null;
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `Pipeline started: understand(ben) → route(coordinator) → implement + review (selected by coordinator)`,
+            `Intent: ${args.message}`,
+            `Roster: ${rosterSummary.split('\n').length} agents available`,
+            dashboardUrl ? `Dashboard: ${dashboardUrl}` : null,
+            'Use squad_wait to monitor progress.',
+          ].filter(Boolean).join('\n'),
+        }],
+      };
+    },
+  );
+
+  // squad_ask: Send a follow-up message to Ben mid-run
+  mcp.addTool(
+    {
+      name: 'squad_ask',
+      description: 'Send a follow-up message or answer to Ben during an active run. Use this to answer questions Ben asked, provide additional context, or change direction.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'Your message to Ben' },
+        },
+        required: ['message'],
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      try {
+        const response = await mgr.sendFollowUp('ben', args.message);
+
+        for (const resolver of waitResolvers) {
+          resolver('user_response');
+        }
+        waitResolvers = [];
+        pendingUserQuestions = [];
+
+        return {
+          content: [{
+            type: 'text',
+            text: response ?? 'Message sent to Ben.',
+          }],
+        };
+      } catch {
+        return {
+          content: [{
+            type: 'text',
+            text: 'Ben does not have an active session. Use squad_run to start a new run.',
+          }],
+        };
+      }
+    },
+  );
+
+  // squad_respond: Answer a specific question from the team
+  mcp.addTool(
+    {
+      name: 'squad_respond',
+      description: 'Answer a pending question from the team. Use this when squad_wait returns questions that need your input.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          answer: { type: 'string', description: 'Your answer to the team\'s question' },
+        },
+        required: ['answer'],
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      const questionContext = pendingUserQuestions.length > 0
+        ? `User answered the following questions: ${pendingUserQuestions.join('; ')}\n\nAnswer: ${args.answer}`
+        : `User response: ${args.answer}`;
+
+      try {
+        const response = await mgr.sendFollowUp('ben', questionContext);
+
+        for (const resolver of waitResolvers) {
+          resolver('user_response');
+        }
+        waitResolvers = [];
+        pendingUserQuestions = [];
+
+        return {
+          content: [{
+            type: 'text',
+            text: response ?? 'Response delivered to Ben.',
+          }],
+        };
+      } catch {
+        return {
+          content: [{
+            type: 'text',
+            text: 'No active session. Use squad_run to start a new run.',
+          }],
+        };
+      }
+    },
+  );
+
+  // squad_pulse: Agents emit structured status updates (internal tool)
+  mcp.addTool(
+    {
+      name: 'squad_pulse',
+      description: 'Emit a structured status update (Pulse). Use this at milestones to report progress, ask questions, or signal completion. The coordinator will route user-relevant pulses to Ben automatically.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agent: { type: 'string', description: 'Your agent name' },
+          phase: { type: 'string', enum: ['starting', 'analyzing', 'implementing', 'testing', 'reviewing', 'done', 'blocked'], description: 'Current phase' },
+          status: { type: 'string', enum: ['ok', 'warning', 'error'], description: 'Status level' },
+          progressPct: { type: 'number', description: 'Progress percentage (0-100)' },
+          summary: { type: 'string', description: 'Brief summary of what happened' },
+          blockers: { type: 'array', items: { type: 'string' }, description: 'List of blockers (empty if none)' },
+          questionsForUser: { type: 'array', items: { type: 'string' }, description: 'Questions that need user input (empty if none)' },
+          artifacts: { type: 'array', items: { type: 'string' }, description: 'Files or outputs produced (empty if none)' },
+          nextStep: { type: 'string', description: 'What you will do next' },
+        },
+        required: ['agent', 'phase', 'status', 'progressPct', 'summary'],
+      },
+    },
+    async (args) => {
+      const pulse = createPulse({
+        agent: args.agent,
+        phase: args.phase as PulsePhase,
+        status: (args.status ?? 'ok') as PulseStatus,
+        progressPct: args.progressPct ?? 0,
+        summary: args.summary,
+        blockers: args.blockers ?? [],
+        questionsForUser: args.questionsForUser ?? [],
+        artifacts: args.artifacts ?? [],
+        nextStep: args.nextStep ?? '',
+      });
+
+      const filter = pulseCollector.record(pulse);
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Pulse recorded: [${pulse.agent}] ${pulse.phase} ${pulse.progressPct}% — ${filter.userRelevant ? '(user-relevant: ' + filter.reason + ')' : '(internal)'}`,
+        }],
+      };
+    },
+  );
+
+  // squad_intent: Inspect the current intent graph
+  mcp.addTool(
+    {
+      name: 'squad_intent',
+      description: 'Return the current Intent Graph for the active run. Shows the parsed goal, constraints, acceptance criteria, task assignments, and status. Useful for inspecting how the team understood your request.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    async () => {
+      if (!activeIntentGraph) {
+        return {
+          content: [{
+            type: 'text',
+            text: 'No active intent graph. Use squad_run to start a run first.',
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: serializeIntentGraph(activeIntentGraph),
+        }],
+      };
+    },
+  );
+
+  // squad_wait: Block until something needs user attention
+  mcp.addTool(
+    {
+      name: 'squad_wait',
+      description: 'Wait for a team event that needs your attention — a question from an agent, a milestone, an error, or run completion. Blocks until something happens or timeout. Use this instead of polling squad_status.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          timeoutMs: { type: 'number', description: 'Maximum wait time in ms (default: 120000 = 2 min)' },
+        },
+      },
+    },
+    async (args) => {
+      const timeoutMs = args.timeoutMs ?? 120_000;
+
+      const queued = pulseCollector.drainUserQueue();
+      if (queued.length > 0) {
+        return {
+          content: [{
+            type: 'text',
+            text: queued.map(p => formatPulseForUser(p)).join('\n\n---\n\n'),
+          }],
+        };
+      }
+
+      let myResolver: ((value: string) => void) | undefined;
+      const reason = await Promise.race([
+        new Promise<string>(resolve => {
+          myResolver = resolve;
+          waitResolvers.push(resolve);
+        }),
+        new Promise<string>(resolve => {
+          setTimeout(() => resolve('timeout'), timeoutMs);
+        }),
+      ]);
+
+      if (myResolver) {
+        waitResolvers = waitResolvers.filter(r => r !== myResolver);
+      }
+
+      if (reason === 'timeout') {
+        const latest = pulseCollector.getLatestByAgent();
+        const summaryLines = [...latest.entries()].map(
+          ([agent, p]) => `${agent}: ${p.phase} ${p.progressPct}% — ${p.summary}`,
+        );
+        return {
+          content: [{
+            type: 'text',
+            text: summaryLines.length > 0
+              ? `No user-relevant events in ${timeoutMs / 1000}s. Current status:\n${summaryLines.join('\n')}`
+              : `No events in ${timeoutMs / 1000}s. Team may still be working. Use squad_status for details.`,
+          }],
+        };
+      }
+
+      const newPulses = pulseCollector.drainUserQueue();
+      if (newPulses.length > 0) {
+        return {
+          content: [{
+            type: 'text',
+            text: newPulses.map(p => formatPulseForUser(p)).join('\n\n---\n\n'),
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: pendingUserQuestions.length > 0
+            ? `Team has questions:\n${pendingUserQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\nUse squad_respond to answer.`
+            : `Event received (${reason}). Use squad_status for details.`,
+        }],
+      };
+    },
+  );
+
+  // squad_wait_for_idle: Block until all agent sessions are idle
+  mcp.addTool(
+    {
+      name: 'squad_wait_for_idle',
+      description: 'Block until all agent sessions have been idle (no new messages) for the specified duration. Use this to wait for a pipeline run to complete before grading or processing results. Returns a summary of agents and messages when idle.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          idleMs: { type: 'number', description: 'Idle threshold in ms — resolve after this much inactivity (default: 30000)' },
+          timeoutMs: { type: 'number', description: 'Maximum wait time in ms before timing out (default: 1800000 = 30 min)' },
+        },
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      const idleMs = args.idleMs ?? 30_000;
+      const timeoutMs = args.timeoutMs ?? 1_800_000;
+
+      try {
+        const result = await mgr.waitForIdle(idleMs, timeoutMs);
+        return {
+          content: [{
+            type: 'text',
+            text: [
+              `Pipeline idle after ${Math.round(result.durationMs / 1000)}s.`,
+              `Active agents: ${result.agents.length > 0 ? result.agents.join(', ') : '(none)'}`,
+              `Total messages: ${result.totalMessages}`,
+            ].join('\n'),
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{
+            type: 'text',
+            text: `Wait failed: ${err instanceof Error ? err.message : String(err)}`,
+          }],
+        };
+      }
+    },
+  );
+
+  // squad_cancel: Cancel an active pipeline run
+  mcp.addTool(
+    {
+      name: 'squad_cancel',
+      description: 'Cancel an active squad_run pipeline. Cancels all running phases, closes agent sessions, and returns a summary of what was completed before cancellation.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    async () => {
+      if (activePipelines.length === 0) {
+        return {
+          content: [{ type: 'text', text: 'No active pipeline to cancel.' }],
+        };
+      }
+
+      const summaryLines: string[] = [];
+      for (const pipeline of activePipelines) {
+        pipeline.cancel();
+        const state = pipeline.getState();
+        const completed = [...state.phaseResults.entries()]
+          .filter(([, r]) => r.status === 'completed')
+          .map(([id]) => id);
+        summaryLines.push(`Pipeline ${state.pipelineId}: cancelled (${completed.length} phases completed: ${completed.join(', ') || 'none'})`);
+      }
+
+      // Close all agent sessions
+      if (started) {
+        const mgr = server.getSessionManager();
+        if (mgr) {
+          const sessions = mgr.listActiveSessions();
+          for (const s of sessions) {
+            try { await mgr.closeSession(s.agentName); } catch { /* ignore */ }
+          }
+          summaryLines.push(`Closed ${sessions.length} agent session(s).`);
+        }
+      }
+
+      activePipelines = [];
+      activeRunId = null;
+      pendingUserQuestions = [];
+      for (const resolver of waitResolvers) {
+        resolver('cancelled');
+      }
+      waitResolvers = [];
+
+      pulseCollector.record(createPulse({
+        agent: 'ben', phase: 'done', status: 'warning', progressPct: 100,
+        summary: 'Run cancelled by user.',
+        blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
+      }));
+
+      return {
+        content: [{ type: 'text', text: summaryLines.join('\n') }],
+      };
+    },
+  );
+
+  // squad_analyze_run: Sage's post-run analysis tool
+  mcp.addTool(
+    {
+      name: 'squad_analyze_run',
+      description: 'Analyze a completed Squad run. Reads pulse history and agent session messages, then produces a structured report with concrete improvement proposals for charters, routing rules, and SDK config. Intended for post-run retrospectives (Sage).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentFilter: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional list of agent names to include. If omitted, all agents are analyzed.',
+          },
+        },
+      },
+    },
+    async (args) => {
+      await ensureStarted();
+      const mgr = server.getSessionManager();
+      if (!mgr) throw new Error('Server not ready');
+
+      // Gather pulse history
+      const collector = server.getPulseCollector();
+      let pulses = [...collector.getAll()];
+
+      // Gather session snapshots
+      const activeSessions = mgr.listActiveSessions();
+      let sessionSnapshots: SessionSnapshot[] = activeSessions.map(info => {
+        const messages = mgr.getMessages(info.agentName);
+        return {
+          agentName: info.agentName,
+          messageCount: messages.length,
+          messages: messages.map(m => ({
+            role: m.role,
+            content: m.content.length > 2000 ? m.content.slice(0, 2000) + '…(truncated)' : m.content,
+            timestamp: m.timestamp,
+          })),
+        };
+      });
+
+      // Apply agent filter if provided
+      if (args.agentFilter && Array.isArray(args.agentFilter) && args.agentFilter.length > 0) {
+        const filterSet = new Set(args.agentFilter as string[]);
+        pulses = pulses.filter(p => filterSet.has(p.agent));
+        sessionSnapshots = sessionSnapshots.filter(s => filterSet.has(s.agentName));
+      }
+
+      if (pulses.length === 0 && sessionSnapshots.length === 0) {
+        return {
+          content: [{
+            type: 'text',
+            text: 'No run data found. Either no agents have been dispatched, or pulse/session data has been cleared.',
+          }],
+        };
+      }
+
+      const report = analyzeRun({
+        pulses,
+        sessions: sessionSnapshots,
+        squadRoot: options.squadRoot,
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: formatAnalysisReport(report),
+        }],
+      };
+    },
+  );
+
+  // --- Start dashboard HTTP server ---
+  const envPort = process.env['SQUAD_DASHBOARD_PORT']
+    ? parseInt(process.env['SQUAD_DASHBOARD_PORT'], 10)
+    : undefined;
+  const configPort = options.squadConfig?.dashboardPort;
+  const dashPort = await resolveDashboardPort({
+    squadRoot: options.squadRoot,
+    configPort: typeof configPort === 'number' ? configPort : undefined,
+    envPort: Number.isNaN(envPort) ? undefined : envPort,
+  });
+  const dashboardPath = path.resolve(
+    path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')),
+    '..', '..', '..', 'squad-cli', 'src', 'dashboard', 'index.html',
+  );
+  // Also check dist-relative path for when running from compiled output
+  const distDashPath = path.resolve(
+    path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')),
+    '..', '..', '..', '..', 'squad-cli', 'src', 'dashboard', 'index.html',
+  );
+  const htmlPath = fs.existsSync(dashboardPath) ? dashboardPath : fs.existsSync(distDashPath) ? distDashPath : null;
+
+  if (htmlPath) {
+    dashServer = http.createServer(async (req, res) => {
+      // CORS for all API routes
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Allow-Headers': 'Content-Type' });
+        res.end();
+        return;
+      }
+      const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
+
+      if (req.url === '/' || req.url === '/index.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        fs.createReadStream(htmlPath).pipe(res);
+      } else if (req.url === '/api/status') {
+        const st = started ? server.getStatus() : { running: false, activeSessions: 0, agents: [], poolCapacity: 0, connectedToHost: false };
+        const history = started ? server.getEventHistory() : null;
+        res.writeHead(200, cors);
+        res.end(JSON.stringify({
+          ...st,
+          started,
+          uptime: started ? Math.floor((Date.now() - serverStartTime) / 1000) : 0,
+          sessionCount: st.activeSessions,
+          recentEvents: history?.recent(100) ?? [],
+          totalEvents: history?.size ?? 0,
+        }));
+      } else if (req.url === '/api/dispatch' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (c: Buffer) => body += c.toString());
+        req.on('end', async () => {
+          try {
+            const { agentName, message, context } = JSON.parse(body);
+            if (!agentName || !message) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agentName and message required' })); return; }
+            await ensureStarted();
+            const result = await server.dispatch(agentName, message, context);
+            res.writeHead(200, cors);
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            res.writeHead(500, cors);
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+          }
+        });
+      } else if (req.url === '/api/close' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (c: Buffer) => body += c.toString());
+        req.on('end', async () => {
+          try {
+            const { agentName } = JSON.parse(body);
+            if (!agentName) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agentName required' })); return; }
+            const mgr = server.getSessionManager();
+            await mgr?.closeSession(agentName);
+            res.writeHead(200, cors);
+            res.end(JSON.stringify({ closed: agentName }));
+          } catch (err) {
+            res.writeHead(500, cors);
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+          }
+        });
+      } else if (req.url?.startsWith('/api/sessions/') && req.method === 'GET') {
+        const agentName = decodeURIComponent(req.url.split('/api/sessions/')[1]?.split('?')[0] ?? '');
+        if (!agentName) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agent name required' })); return; }
+        const mgr = server.getSessionManager();
+        const messages = mgr?.getMessages(agentName) ?? [];
+        res.writeHead(200, cors);
+        res.end(JSON.stringify({ agentName, messages }));
+      } else if (req.url === '/api/send' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (c: Buffer) => body += c.toString());
+        req.on('end', async () => {
+          try {
+            const { agentName, message } = JSON.parse(body);
+            if (!agentName || !message) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agentName and message required' })); return; }
+            const mgr = server.getSessionManager();
+            const response = await mgr?.sendFollowUp(agentName, message);
+            res.writeHead(200, cors);
+            res.end(JSON.stringify({ sent: true, agentName, response }));
+          } catch (err) {
+            res.writeHead(500, cors);
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+          }
+        });
+      } else {
+        res.writeHead(404);
+        res.end('Not found');
+      }
+    });
+
+    dashServer.listen(dashPort, () => {
+      const addr = dashServer!.address();
+      const actualPort = typeof addr === 'object' && addr ? addr.port : dashPort;
+      dashboardUrl = `http://localhost:${actualPort}`;
+      persistPort(options.squadRoot, actualPort);
+      process.stderr.write(`[squad-mcp] Dashboard: ${dashboardUrl}\n`);
+    });
+    dashServer.on('error', (err: any) => {
+      if (err.code === 'EADDRINUSE') {
+        process.stderr.write(`[squad-mcp] Dashboard port ${dashPort} in use, trying random port\n`);
+        dashServer!.listen(0, () => {
+          const addr = dashServer!.address();
+          const actualPort = typeof addr === 'object' && addr ? addr.port : 0;
+          dashboardUrl = `http://localhost:${actualPort}`;
+          persistPort(options.squadRoot, actualPort);
+          process.stderr.write(`[squad-mcp] Dashboard: ${dashboardUrl}\n`);
+        });
+      }
+    });
+  }
+
+  // --- Eager start — connect to Copilot backend immediately ---
+  // Don't block MCP protocol — start in background, retry on dispatch if needed
+  ensureStarted().catch(() => {
+    process.stderr.write('[squad-mcp] Eager start failed — will retry on first dispatch\n');
+  });
 
   // --- Start MCP protocol loop ---
   process.stderr.write('[squad-mcp] Squad MCP server ready (waiting for Copilot)\n');

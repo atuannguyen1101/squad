@@ -25,6 +25,7 @@ export {
   type CharterConfigOverrides, 
   type ParsedCharter,
   type CompiledCharter,
+  type McpServerDeclaration,
 } from './charter-compiler.js';
 
 // --- M1-9 Model Selection + M3-5 Model Fallback ---
@@ -63,13 +64,12 @@ export {
   type ParsedHistory,
 } from './history-shadow.js';
 
-// --- Intent Graph Lifecycle ---
+// --- Cross-Session Learning Persistence ---
 export {
-  buildSystemPrompt,
-  createSystemPromptWithConfig,
-  type SystemPromptOptions,
-  type SquadConfig,
-} from './agent-lifecycle.js';
+  extractSessionLearnings,
+  type ExtractedLearning,
+  type ExtractionResult,
+} from './session-learnings.js';
 
 // --- M2-10 Agent Onboarding ---
 export {
@@ -79,30 +79,25 @@ export {
   type OnboardResult,
 } from './onboarding.js';
 
-// --- Personal Squad Agents ---
-export {
-  resolvePersonalAgents,
-  mergeSessionCast,
-  type PersonalAgentMeta,
-  type PersonalAgentManifest,
-} from './personal.js';
-
-// --- M4-12 Learning Persistence ---
-export {
-  enableLearningPersistence,
-  type LearningPersistenceConfig,
-  type PulseCollector,
-  type SessionDestroyedEvent,
-} from './learning-persistence.js';
-
-// --- M4-12 Learning Extractor (exported for testing and direct use) ---
+// --- Learning Extraction & Persistence ---
 export {
   extractLearnings,
-  type SessionMessage,
-  type Pulse,
   type LearningExtraction,
   type LearningExtractionOptions,
 } from './learning-extractor.js';
+
+export {
+  enableLearningPersistence,
+  type LearningPersistenceConfig,
+} from './learning-persistence.js';
+
+export {
+  BUILT_IN_ACTORS,
+  isBuiltInActor,
+  getBuiltInActor,
+  getBuiltInActorNames,
+  type BuiltInActor,
+} from './built-in-actors.js';
 
 // --- Charter Types ---
 
@@ -133,6 +128,9 @@ export interface AgentCharter {
 
   /** Model preference from charter */
   modelPreference?: string;
+
+  /** MCP servers declared in charter (## MCP Servers section) */
+  mcpServers?: Record<string, import('./charter-compiler.js').McpServerDeclaration>;
 }
 
 export type AgentLifecycleState = 'pending' | 'spawning' | 'active' | 'idle' | 'error' | 'destroyed';
@@ -172,6 +170,7 @@ export class CharterCompiler {
       style,
       prompt: content,
       modelPreference: parsed.modelPreference,
+      mcpServers: parsed.mcpServers,
     };
   }
 

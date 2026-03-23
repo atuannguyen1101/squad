@@ -72,8 +72,32 @@ export interface ParsedCharter {
   modelFallback?: string;
   /** Collaboration section content */
   collaboration?: string;
+  /** MCP servers declared in charter (## MCP Servers section) */
+  mcpServers?: Record<string, McpServerDeclaration>;
   /** Full charter content */
   fullContent: string;
+}
+
+/**
+ * MCP server declaration from a charter's ## MCP Servers section.
+ * Supports both named references (to servers in ~/.copilot/mcp-config.json)
+ * and inline definitions.
+ */
+export interface McpServerDeclaration {
+  /** Server name (key in the record) */
+  name?: string;
+  /** Tool filter: specific tool names or '*' for all */
+  tools?: string[];
+  /** For inline definitions: command to run */
+  command?: string;
+  /** For inline definitions: command args */
+  args?: string[];
+  /** For inline definitions: environment variables */
+  env?: Record<string, string>;
+  /** Server type */
+  type?: string;
+  /** For remote servers: URL */
+  url?: string;
 }
 
 /**
@@ -256,6 +280,45 @@ export function parseCharterMarkdown(content: string): ParsedCharter {
   const collaborationMatch = content.match(/##\s+Collaboration\s*\n([\s\S]*?)(?=\n##|\n---|$)/i);
   if (collaborationMatch) {
     result.collaboration = collaborationMatch[1]!.trim();
+  }
+
+  // Extract ## MCP Servers section
+  // Supports two formats:
+  //   1. Named references: `- github` or `- github: tool1, tool2` (references ~/.copilot/mcp-config.json)
+  //   2. Inline: `- myserver: command=node args=server.js tools=*`
+  const mcpMatch = content.match(/##\s+MCP Servers\s*\n([\s\S]*?)(?=\n##|\n---|$)/i);
+  if (mcpMatch) {
+    const mcpContent = mcpMatch[1]!;
+    const servers: Record<string, McpServerDeclaration> = {};
+    
+    // Parse list items: "- servername" or "- servername: tool1, tool2" or "- servername (tools: tool1, tool2)"
+    const lines = mcpContent.split('\n');
+    for (const line of lines) {
+      const listMatch = line.match(/^\s*[-*]\s+`?(\w[\w-]*)`?\s*(?::\s*(.+))?$/);
+      if (!listMatch) continue;
+      
+      const serverName = listMatch[1]!.trim();
+      const rest = listMatch[2]?.trim();
+      
+      const decl: McpServerDeclaration = { name: serverName };
+      
+      if (rest) {
+        // Check for "tools: x, y" or just "x, y" (tool list)
+        const toolsExplicit = rest.match(/tools?\s*:\s*(.+)/i);
+        if (toolsExplicit) {
+          decl.tools = toolsExplicit[1]!.split(',').map(t => t.trim()).filter(t => t.length > 0);
+        } else {
+          // Treat as comma-separated tool names
+          decl.tools = rest.split(',').map(t => t.trim()).filter(t => t.length > 0);
+        }
+      }
+      
+      servers[serverName] = decl;
+    }
+    
+    if (Object.keys(servers).length > 0) {
+      result.mcpServers = servers;
+    }
   }
   
   return result;

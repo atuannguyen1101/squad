@@ -9,23 +9,15 @@
  * propagate to the caller or crash the server.
  */
 
-import type { EventBus, UnsubscribeFn } from '../runtime/event-bus.js';
-import { extractLearnings, type LearningExtraction, type SessionMessage, type Pulse } from './learning-extractor.js';
-import { appendToHistory, shadowExists, createHistoryShadow } from './history-shadow.js';
+import { extractLearnings, type LearningExtraction, type LearningExtractionOptions } from './learning-extractor.js';
+import { appendToHistory, shadowExists, createHistoryShadow, type HistorySection } from './history-shadow.js';
+import type { EventBus, UnsubscribeFn, SquadEvent } from '../runtime/event-bus.js';
+import type { PulseCollector } from '../pulse/pulse.js';
+import type { SessionMessage } from '../server/agent-lifecycle.js';
 
-// PulseCollector interface
-export interface PulseCollector {
-  getByAgent(agentName: string): Pulse[];
-}
-
-// Event payload interface
-export interface SessionDestroyedEvent {
-  eventName: string;
-  agentName?: string;
-  payload?: {
-    messages?: SessionMessage[];
-  };
-}
+// ============================================================================
+// Types
+// ============================================================================
 
 export interface LearningPersistenceConfig {
   /** Whether learning persistence is enabled. Default: true */
@@ -59,11 +51,11 @@ async function persistExtraction(
     await createHistoryShadow(squadRoot, agentName, extraction.sessionSummary);
   }
 
-  const sections = [
-    { section: 'Learnings' as const, content: extraction.learnings },
-    { section: 'Decisions' as const, content: extraction.decisions },
-    { section: 'Patterns' as const, content: extraction.patterns },
-    { section: 'Issues' as const, content: extraction.issues },
+  const sections: Array<{ section: HistorySection; content: string | null }> = [
+    { section: 'Learnings', content: extraction.learnings },
+    { section: 'Decisions', content: extraction.decisions },
+    { section: 'Patterns', content: extraction.patterns },
+    { section: 'Issues', content: extraction.issues },
   ];
 
   for (const { section, content } of sections) {
@@ -75,12 +67,7 @@ async function persistExtraction(
   // Write artifacts as a reference entry if there are any
   if (extraction.artifacts.length > 0) {
     const artifactContent = extraction.artifacts.map(a => `- ${a}`).join('\n');
-    await appendToHistory(
-      squadRoot,
-      agentName,
-      'References',
-      `Session artifacts:\n${artifactContent}`,
-    );
+    await appendToHistory(squadRoot, agentName, 'References', `Session artifacts:\n${artifactContent}`);
   }
 }
 
@@ -92,16 +79,20 @@ async function persistExtraction(
  * crash the server.
  */
 async function handleSessionDestroyed(
-  event: SessionDestroyedEvent,
+  event: SquadEvent,
   pulseCollector: PulseCollector,
   config: LearningPersistenceConfig,
 ): Promise<void> {
   const agentName = event.agentName;
   if (!agentName) return;
 
-  const payload = event.payload;
-  const messages = payload?.messages;
+  const payload = event.payload as {
+    durationMs?: number;
+    messages?: SessionMessage[];
+    messageCount?: number;
+  } | undefined;
 
+  const messages = payload?.messages;
   if (!messages || messages.length === 0) return;
 
   // Skip short sessions
@@ -110,7 +101,7 @@ async function handleSessionDestroyed(
   // Get pulse data for this agent
   const pulses = pulseCollector.getByAgent(agentName);
 
-  const extractionOptions = {
+  const extractionOptions: LearningExtractionOptions = {
     maxLength: config.maxSectionLength,
     minMessages: config.minMessages,
   };
@@ -118,13 +109,7 @@ async function handleSessionDestroyed(
   const extraction = extractLearnings(messages, pulses, extractionOptions);
 
   // Skip if nothing was extracted
-  if (
-    !extraction.learnings &&
-    !extraction.decisions &&
-    !extraction.patterns &&
-    !extraction.issues &&
-    extraction.artifacts.length === 0
-  ) {
+  if (!extraction.learnings && !extraction.decisions && !extraction.patterns && !extraction.issues && extraction.artifacts.length === 0) {
     return;
   }
 
@@ -152,15 +137,13 @@ export function enableLearningPersistence(
     return () => {};
   }
 
-  const unsubscribe = eventBus.subscribe('session:destroyed', async (event: any) => {
+  const unsubscribe = eventBus.subscribe('session:destroyed', async (event: SquadEvent) => {
     try {
-      await handleSessionDestroyed(event as SessionDestroyedEvent, pulseCollector, config);
+      await handleSessionDestroyed(event, pulseCollector, config);
     } catch (error) {
       // Learning persistence should never crash the server
       process.stderr.write(
-        `[learning-persistence] Failed to persist learnings for ${event.agentName ?? 'unknown'}: ${
-          error instanceof Error ? error.message : String(error)
-        }\n`,
+        `[learning-persistence] Failed to persist learnings for ${event.agentName ?? 'unknown'}: ${error instanceof Error ? error.message : String(error)}\n`,
       );
     }
   });

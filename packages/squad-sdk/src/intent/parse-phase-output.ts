@@ -9,19 +9,27 @@
  * partial updates suitable for updateIntentGraph().
  */
 
-import type { IntentGraphUpdate, IntentTask } from './types.js';
+import type { IntentGraph, IntentTask } from './intent-graph.js';
+
+export type UnderstandPhaseUpdate = Partial<
+  Pick<IntentGraph, 'goal' | 'constraints' | 'acceptanceCriteria' | 'currentStatus'>
+>;
+
+export type RoutePhaseUpdate = { tasks: IntentTask[]; currentStatus: 'in-progress' };
 
 /**
  * Extract goal, constraints, and acceptance criteria from Ben's understand
  * phase output. Looks for markdown section headers first, then falls back
  * to keyword-based extraction.
  */
-export function parseUnderstandPhaseOutput(text: string): IntentGraphUpdate {
+export function parseUnderstandPhaseOutput(text: string): UnderstandPhaseUpdate {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
   const constraints: string[] = [];
   const acceptanceCriteria: string[] = [];
   let goal: string | undefined;
-  let currentSection: 'constraints' | 'acceptance' | 'other' | 'none' = 'none';
+
+  let currentSection: 'none' | 'constraints' | 'acceptance' | 'other' = 'none';
 
   for (const line of lines) {
     // Detect section headers
@@ -73,12 +81,16 @@ export function parseUnderstandPhaseOutput(text: string): IntentGraphUpdate {
  * Extract task assignments from Coordinator's route phase JSON output.
  * Expects: {"implementer": "name", "reviewer": "name", "architect": null}
  */
-export function parseRoutePhaseOutput(text: string): IntentGraphUpdate {
+export function parseRoutePhaseOutput(text: string): RoutePhaseUpdate {
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) return { tasks: [], currentStatus: 'in-progress' };
 
   try {
-    const routing = JSON.parse(jsonMatch[0]) as Record<string, string | null>;
+    const routing = JSON.parse(jsonMatch[0]) as {
+      implementer?: string;
+      reviewer?: string;
+      architect?: string | null;
+    };
     const tasks: IntentTask[] = [];
 
     if (routing.implementer) {
@@ -89,7 +101,6 @@ export function parseRoutePhaseOutput(text: string): IntentGraphUpdate {
         status: 'pending',
       });
     }
-
     if (routing.reviewer) {
       tasks.push({
         id: 'review',
@@ -99,7 +110,6 @@ export function parseRoutePhaseOutput(text: string): IntentGraphUpdate {
         dependencies: ['implement'],
       });
     }
-
     if (routing.architect) {
       tasks.push({
         id: 'architect',

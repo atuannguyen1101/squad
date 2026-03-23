@@ -18,6 +18,7 @@ docs/dist/
 # Squad: SubSquad activation file (local to this machine)
 .squad-workstream
 .squad/.first-run
+.squad/.mcp-port
 
 # Images folder (root only — don't ignore docs/public/images/)
 /images/

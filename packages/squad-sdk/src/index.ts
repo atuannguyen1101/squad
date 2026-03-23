@@ -10,26 +10,16 @@ const pkg = require('../package.json');
 export const VERSION: string = pkg.version;
 
 // Export public API
-export { resolveSquad, resolveGlobalSquadPath, resolvePersonalSquadDir, ensureSquadPath, ensureSquadPathTriple, loadDirConfig, isConsultMode } from './resolution.js';
+export { resolveSquad, resolveGlobalSquadPath, ensureSquadPath, loadDirConfig, isConsultMode } from './resolution.js';
 export type { SquadDirConfig, ResolvedSquadPaths } from './resolution.js';
 export * from './config/index.js';
 export * from './agents/onboarding.js';
-export { resolvePersonalAgents, mergeSessionCast } from './agents/personal.js';
-export type { PersonalAgentMeta, PersonalAgentManifest } from './agents/personal.js';
+export { BUILT_IN_ACTORS, isBuiltInActor, getBuiltInActor, getBuiltInActorNames } from './agents/built-in-actors.js';
+export type { BuiltInActor } from './agents/built-in-actors.js';
 export * from './casting/index.js';
 export * from './skills/index.js';
 export { selectResponseTier, getTier } from './coordinator/response-tiers.js';
 export type { ResponseTier, TierName, TierContext, ModelTierSuggestion } from './coordinator/response-tiers.js';
-export { HandoffManager } from './coordinator/handoff.js';
-export type { HandoffRequest, HandoffResult, HandoffChainNode, HandoffConfig } from './coordinator/handoff.js';
-export { MetricsTracker } from './coordinator/metrics.js';
-export type { AgentMetrics, TaskOutcome, MetricsSnapshot } from './coordinator/metrics.js';
-export { RouteScorer } from './coordinator/route-scorer.js';
-export type { ScoredRoute, RouteScoreConfig } from './coordinator/route-scorer.js';
-export { EscalationManager } from './coordinator/escalation.js';
-export type { EscalationLevel, EscalationConfig, EscalationContext, EscalationState, EscalationEvent } from './coordinator/escalation.js';
-export { createMetricsTool } from './tools/metrics-tool.js';
-export type { MetricsQuery } from './tools/metrics-tool.js';
 export { loadConfig, loadConfigSync } from './runtime/config.js';
 export type { ConfigLoadResult, ConfigValidationError } from './runtime/config.js';
 export { MODELS, TIMEOUTS, AGENT_ROLES } from './runtime/constants.js';
@@ -42,29 +32,9 @@ export * from './runtime/i18n.js';
 export * from './runtime/benchmarks.js';
 export * from './runtime/otel-init.js';
 export * from './runtime/otel-metrics.js';
-export * from './runtime/rework.js';
 export { getMeter, getTracer } from './runtime/otel.js';
 export { safeTimestamp } from './utils/safe-timestamp.js';
 export { EventBus as RuntimeEventBus } from './runtime/event-bus.js';
-export {
-  type SquadManifest,
-  type SquadContact,
-  type AcceptedWorkType,
-  type DiscoveredSquad,
-  type CrossSquadIssueOptions,
-  type CrossSquadIssueResult,
-  type CrossSquadWorkStatus,
-  validateManifest,
-  readManifest,
-  discoverSquads,
-  discoverFromUpstreams,
-  discoverFromRegistry,
-  buildDelegationArgs,
-  buildStatusCheckArgs,
-  parseIssueStatus,
-  formatDiscoveryTable,
-  findSquadByName,
-} from './runtime/cross-squad.js';
 
 export * from './marketplace/index.js';
 export * from './build/index.js';
@@ -77,7 +47,6 @@ export * from './streams/index.js';
 export {
   defineTeam,
   defineAgent,
-  defineBudget,
   defineRouting,
   defineCeremony,
   defineHooks,
@@ -92,7 +61,6 @@ export type {
   AgentRef,
   ScheduleExpression,
   BuilderModelId,
-  BudgetDefinition,
   ModelPreference,
   DefaultsDefinition,
   TeamDefinition,
@@ -112,82 +80,23 @@ export type {
 export * from './roles/index.js';
 export * from './platform/index.js';
 
-// Proposal Pipeline (self-improvement system)
-export {
-  classifyProposalRisk,
-  classifyProposals,
-  classifyPathSensitivity,
-  generateProposalId,
-  createProposalRecord,
-  formatProposalMarkdown,
-  autoApplyProposal,
-  saveAppliedRecord,
-  formatProposalsForUser,
-  loadEffectivenessLog,
-  saveEffectivenessLog,
-  recordApplicationForTracking,
-  checkEffectiveness,
-  runProposalPipeline,
-} from './mcp/proposal-pipeline.js';
-export type {
-  ProposalCategory,
-  ProposalPriority,
-  ProposalRiskLevel,
-  ImprovementProposal,
-  ClassifiedProposal,
-  ProposalStatus,
-  ProposalRecord,
-  AutoApplyResult,
-  EffectivenessRecord,
-  EffectivenessLog,
-  PipelineResult,
-} from './mcp/proposal-pipeline.js';
-
-// Ceremony Runner (ceremony execution engine)
-export {
-  CeremonyRunner,
-  buildRetrospectivePrompt,
-  buildCeremonyContext,
-  formatCeremonyReport,
-  saveCeremonyReport,
-  triggerCeremonyManually,
-} from './server/ceremony-runner.js';
-export type {
-  CeremonyType,
-  CeremonyConfigExtended,
-  CeremonyPulse,
-  AppliedProposalSummary,
-  CeremonyContext,
-  CeremonyResult,
-  CeremonyDispatchFn,
-} from './server/ceremony-runner.js';
-
-// Built-in ceremony types
-export {
-  createDefaultRetrospective,
-  createIdleRetrospective,
-  validateCeremonyConfig,
-} from './server/ceremonies/retrospective.js';
-
-// Intent Graph (Sprint 3, Item #14)
-export {
-  IntentGraph,
-  IntentSummarizer,
-  type IntentNode,
-  type IntentEdge,
-  type IntentGraphData,
-  type IntentSummary,
-} from './intent/index.js';
-
-export {
-  buildSystemPrompt,
-  createSystemPromptWithConfig,
-  type SystemPromptOptions,
-  type SquadConfig,
-} from './agents/agent-lifecycle.js';
-
 // Server (Orchestration Server)
 export * from './server/index.js';
 
 // MCP (Model Context Protocol bridge)
 export * from './mcp/index.js';
+
+// Pipeline (Deterministic DAG execution)
+export * from './pipeline/index.js';
+
+// Intent Graph (Structured user intent)
+export * from './intent/index.js';
+
+// Pulse Protocol (Structured agent status)
+export * from './pulse/index.js';
+
+// Context Windowing (Auto-summarization)
+export * from './context/index.js';
+
+// Scratchpad (Cross-agent artifact sharing)
+export * from './scratchpad/index.js';

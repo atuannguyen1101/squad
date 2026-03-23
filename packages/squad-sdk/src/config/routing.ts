@@ -124,7 +124,8 @@ export function parseRoutingMarkdown(content: string): RoutingConfig {
     
     // Detect routing table section
     if (trimmed.toLowerCase().includes('## routing table') || 
-        trimmed.toLowerCase().includes('##routing table')) {
+        trimmed.toLowerCase().includes('##routing table') ||
+        trimmed.toLowerCase().includes('## work type')) {
       inRoutingTable = true;
       headerPassed = false;
       continue;
