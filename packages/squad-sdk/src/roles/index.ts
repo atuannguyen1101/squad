@@ -12,6 +12,15 @@
 
 export type { BaseRole, RoleCategory, UseRoleOptions } from './types.js';
 export { BASE_ROLES, ENGINEERING_ROLE_IDS, CATEGORY_ROLE_IDS } from './catalog.js';
+export { defineRole, RoleBuilder, RoleValidationError } from './define-role.js';
+export { RoleCatalog } from './role-catalog.js';
+export {
+  loadRolesFromDirectory,
+  loadRolesFromDirectorySync,
+  validateRoleJson,
+  type RoleLoadError,
+  type RoleLoadResult,
+} from './loader.js';
 
 import type { BaseRole, RoleCategory, UseRoleOptions } from './types.js';
 import type { AgentDefinition } from '../builders/types.js';

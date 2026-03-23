@@ -3,7 +3,17 @@
  *
  * Generates themed agent personas from a universe template.
  * Each CastMember maps to an agent role with name, personality, and backstory.
+ *
+ * v2 additions (Sprint 2, Issue #8):
+ * - Dynamic universe registration via registerUniverse()
+ * - Directory loading via loadUniversesFromDirectory()
+ * - UniverseId relaxed to string (supports custom universe names)
  */
+
+import type {
+  UniverseTemplate as ExternalUniverseTemplate,
+  UniverseCharacter as ExternalUniverseCharacter,
+} from './universe-schema.js';
 
 // --- Types ---
 
@@ -18,7 +28,12 @@ export type AgentRole =
   | 'scribe'
   | 'reviewer';
 
-export type UniverseId = 'usual-suspects' | 'oceans-eleven' | 'custom';
+/**
+ * Universe identifier.
+ * Built-in values: 'usual-suspects', 'oceans-eleven', 'custom'.
+ * Custom universes add their own IDs at runtime.
+ */
+export type UniverseId = string;
 
 export interface CastMember {
   /** Character name from the universe */
@@ -54,7 +69,7 @@ interface UniverseCharacter {
 }
 
 interface UniverseTemplate {
-  id: UniverseId;
+  id: string;
   label: string;
   characters: UniverseCharacter[];
 }
@@ -181,7 +196,7 @@ const OCEANS_ELEVEN: UniverseTemplate = {
   ],
 };
 
-const UNIVERSES: Map<UniverseId, UniverseTemplate> = new Map([
+const BUILT_IN_UNIVERSES: Map<string, UniverseTemplate> = new Map([
   ['usual-suspects', USUAL_SUSPECTS],
   ['oceans-eleven', OCEANS_ELEVEN],
 ]);
@@ -189,14 +204,59 @@ const UNIVERSES: Map<UniverseId, UniverseTemplate> = new Map([
 // --- Casting Engine ---
 
 export class CastingEngine {
+  /**
+   * Instance-level universe registry.
+   * Initialized with built-in universes; custom universes added at runtime.
+   */
+  private universes: Map<string, UniverseTemplate> = new Map(BUILT_IN_UNIVERSES);
+
   /** List available universe IDs. */
-  getUniverses(): UniverseId[] {
-    return Array.from(UNIVERSES.keys());
+  getUniverses(): string[] {
+    return Array.from(this.universes.keys());
   }
 
   /** Get a universe template by ID. */
-  getUniverse(id: UniverseId): UniverseTemplate | undefined {
-    return UNIVERSES.get(id);
+  getUniverse(id: string): UniverseTemplate | undefined {
+    return this.universes.get(id);
+  }
+
+  /**
+   * Register a custom universe template.
+   *
+   * Converts from the external UniverseTemplate schema (used in JSON files)
+   * to the internal format. If a universe with the same ID already exists,
+   * it is replaced.
+   *
+   * @param template - Universe template to register
+   */
+  registerUniverse(template: ExternalUniverseTemplate): void {
+    const internal: UniverseTemplate = {
+      id: template.id,
+      label: template.name,
+      characters: template.characters.map((c: ExternalUniverseCharacter) => ({
+        name: c.name,
+        personality: c.personality,
+        backstory: c.backstory,
+        preferredRoles: c.preferredRoles,
+      })),
+    };
+    this.universes.set(template.id, internal);
+  }
+
+  /**
+   * Load custom universes from a directory.
+   *
+   * Reads `.universe.json` files from the specified directory,
+   * validates them, and registers valid universes in this engine.
+   *
+   * @param dir - Path to the universes directory
+   */
+  async loadUniversesFromDirectory(dir: string): Promise<void> {
+    const { loadUniversesFromDirectory } = await import('./universe-loader.js');
+    const templates = await loadUniversesFromDirectory(dir);
+    for (const template of templates) {
+      this.registerUniverse(template);
+    }
   }
 
   /**
@@ -211,7 +271,7 @@ export class CastingEngine {
       return this.castCustomTeam(config);
     }
 
-    const template = UNIVERSES.get(config.universe);
+    const template = this.universes.get(config.universe);
     if (!template) {
       throw new Error(`Unknown universe: ${config.universe}`);
     }

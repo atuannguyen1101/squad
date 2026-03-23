@@ -18,6 +18,19 @@ export {
   type UniverseId,
 } from './casting-engine.js';
 
+// Universe schema and loader (Sprint 2, Issue #8)
+export {
+  type UniverseTemplate,
+  type UniverseCharacter,
+  type UniverseLoadError,
+  validateUniverseJson,
+} from './universe-schema.js';
+export {
+  loadUniversesFromDirectory,
+  loadUniversesFromDirectorySync,
+  type UniverseLoadResult,
+} from './universe-loader.js';
+
 // Re-export casting history (M3-10)
 export {
   CastingHistory,
