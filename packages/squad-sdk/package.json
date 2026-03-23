@@ -1,6 +1,6 @@
 {
   "name": "@bradygaster/squad-sdk",
-  "version": "0.9.1-build.1",
+  "version": "0.9.1-build.4",
   "description": "Squad SDK — Programmable multi-agent runtime for GitHub Copilot",
   "type": "module",
   "main": "./dist/index.js",
@@ -186,9 +186,17 @@
       "types": "./dist/config/models.d.ts",
       "import": "./dist/config/models.js"
     },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js"
+    },
     "./mcp/proposal-pipeline": {
       "types": "./dist/mcp/proposal-pipeline.d.ts",
       "import": "./dist/mcp/proposal-pipeline.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
     },
     "./server/ceremony-runner": {
       "types": "./dist/server/ceremony-runner.d.ts",

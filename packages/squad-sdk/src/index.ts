@@ -43,6 +43,29 @@ export * from './upstream/index.js';
 export * from './remote/index.js';
 export * from './streams/index.js';
 
+// Cross-Squad Orchestration
+export {
+  discoverSquads,
+  discoverFromUpstreams,
+  discoverFromRegistry,
+  formatDiscoveryTable,
+  findSquadByName,
+  buildDelegationArgs,
+  buildStatusCheckArgs,
+  parseIssueStatus,
+  validateManifest,
+  readManifest,
+} from './runtime/cross-squad.js';
+export type {
+  SquadContact,
+  AcceptedWorkType,
+  SquadManifest,
+  DiscoveredSquad,
+  CrossSquadIssueOptions,
+  CrossSquadIssueResult,
+  CrossSquadWorkStatus,
+} from './runtime/cross-squad.js';
+
 // Builder functions (SDK-First Squad Mode)
 export {
   defineTeam,
