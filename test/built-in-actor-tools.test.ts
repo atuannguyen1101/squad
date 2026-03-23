@@ -144,8 +144,8 @@ describe('Coordinator tool restrictions', () => {
 describe('Sage tool restrictions', () => {
   const sage = getBuiltInActor('sage')!;
 
-  it('should have exactly 6 tools', () => {
-    expect(sage.allowedTools).toHaveLength(6);
+  it('should have exactly 7 tools', () => {
+    expect(sage.allowedTools).toHaveLength(7);
   });
 
   it('should have squad_decide for proposing decisions', () => {
@@ -158,6 +158,10 @@ describe('Sage tool restrictions', () => {
 
   it('should have squad_skill for reading and writing skills', () => {
     expect(sage.allowedTools).toContain('squad_skill');
+  });
+
+  it('should have squad_proposals for writing improvement proposals', () => {
+    expect(sage.allowedTools).toContain('squad_proposals');
   });
 
   it('should NOT have squad_route (sage analyzes, does not dispatch)', () => {

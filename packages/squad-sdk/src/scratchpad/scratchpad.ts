@@ -11,6 +11,7 @@
  * - Events emitted on write for reactive consumers
  * - Bounded: configurable max entries and max value size
  */
+// Verified by auto-Sage test run
 
 // ============================================================================
 // Types

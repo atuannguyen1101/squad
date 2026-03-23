@@ -13,8 +13,10 @@ import { TOOL_CALL_PLACEHOLDER } from '../server/agent-lifecycle.js';
 import type { SquadConfig } from '../runtime/config.js';
 import { createPulse, formatPulseForUser, type PulsePhase, type PulseStatus } from '../pulse/index.js';
 import { createEmptyIntentGraph, serializeIntentGraph, updateIntentGraph, parseUnderstandPhaseOutput, parseRoutePhaseOutput, type IntentGraph } from '../intent/index.js';
-import { PipelineRunner, type PipelineDefinition, type PipelineRunnerDeps } from '../pipeline/index.js';
+import { PipelineRunner, parseRoutingDecision, generateImplPhases, isValidRoutingResponse, type PipelineDefinition, type PipelineRunnerDeps } from '../pipeline/index.js';
 import { analyzeRun, formatAnalysisReport, type SessionSnapshot } from './analyze-run.js';
+import { triggerAutoSageAnalysis } from './auto-sage.js';
+import { resolveDashboardPort, persistPort, clearPersistedPort } from './dashboard-port.js';
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -504,6 +506,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   let dashServer: http.Server | null = null;
   const shutdown = async () => {
     process.stderr.write('[squad-mcp] Shutting down...\n');
+    clearPersistedPort(options.squadRoot);
     if (dashServer) dashServer.close();
     if (started) {
       await server.stop();
@@ -719,21 +722,20 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             '',
             routingContext ? `Routing rules:\n${routingContext.slice(0, 2000)}` : 'No routing.md found.',
             '',
-            'Respond with ONLY a JSON object, nothing else:',
+            'Respond with ONLY a JSON object, nothing else.',
+            '',
+            'For a simple task (single concern), use:',
             '{"implementer": "agent_name", "reviewer": "agent_name", "architect": null}',
             '',
-            'Pick the agent whose role best matches the task. If unsure, pick the first developer-like agent for implementer and first reviewer-like agent for reviewer.',
+            'For a multi-part task with independent parts that different agents can handle in parallel, use:',
+            '{"subtasks": [{"agent": "agent_a", "task": "part 1 description"}, {"agent": "agent_b", "task": "part 2 description"}], "reviewer": "agent_name"}',
+            '',
+            'Pick the agent whose role best matches the task. If unsure, use the simple single-agent format.',
           ].join('\n'),
           dependsOn: ['understand'],
           gate: {
-            validate: (o: unknown) => {
-              if (typeof o !== 'string') return false;
-              try {
-                const parsed = JSON.parse(o.match(/\{[\s\S]*\}/)?.[0] ?? '');
-                return parsed.implementer && parsed.reviewer;
-              } catch { return false; }
-            },
-            description: 'Coordinator must return valid JSON with implementer and reviewer',
+            validate: isValidRoutingResponse,
+            description: 'Coordinator must return valid JSON with implementer/reviewer or subtasks/reviewer',
           },
           timeout: 60_000,
         },
@@ -752,64 +754,22 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         const routeResult = state.phaseResults.get('route');
         if (routeResult?.status !== 'completed' || !routeResult.output) return;
 
-        let routing: { implementer: string; reviewer: string; architect?: string | null };
-        try {
-          const jsonStr = (routeResult.output as string).match(/\{[\s\S]*\}/)?.[0] ?? '';
-          routing = JSON.parse(jsonStr);
-        } catch { return; }
+        // --- Parse Coordinator response and generate implementation phases ---
+        const routingDecision = parseRoutingDecision(routeResult.output as string);
+        if (!routingDecision) return;
 
-        const implName = routing.implementer.toLowerCase();
-        const revName = routing.reviewer.toLowerCase();
+        const revName = routingDecision.reviewer;
 
-        const implPhases: import('../pipeline/types.js').PhaseDefinition[] = [
-          {
-            id: 'implement',
-            agent: implName,
-            task: [
-              `Implement the following request:`,
-              `${args.message}${contextAddendum}`,
-              '',
-              'Write code, add tests, and verify the build passes.',
-              'Use squad_pulse to report progress at milestones.',
-              'When done, emit squad_pulse with phase "done" listing the files you created or modified.',
-            ].join('\n'),
-            gate: {
-              validate: (o: unknown) => {
-                // Accept if the agent produced substantial text output
-                // (but not if it's just the tool-call placeholder)
-                if (typeof o === 'string' && o !== TOOL_CALL_PLACEHOLDER && o.length > 50) return true;
-                // Also accept if the agent emitted a "done" pulse — this covers
-                // agents that do work via tool calls (file edits, commands) and
-                // report completion through squad_pulse instead of text.
-                const agentPulses = pulseCollector.getByAgent(implName);
-                return agentPulses.some(p => p.phase === 'done');
-              },
-              description: 'Implementer must produce substantial output or emit a done pulse',
-            },
-            timeout: 300_000,
+        const implPhases = generateImplPhases(routingDecision, {
+          message: args.message,
+          contextAddendum,
+          toolCallPlaceholder: TOOL_CALL_PLACEHOLDER,
+          hasDonePulse: (agentName: string) => {
+            const agentPulses = pulseCollector.getByAgent(agentName);
+            return agentPulses.some(p => p.phase === 'done');
           },
-          {
-            id: 'review',
-            agent: revName,
-            task: [
-              `Review the implementation for: ${args.message}`,
-              '',
-              `Use squad_read_session to read ${implName}'s session and see what was built.`,
-              'Check: code quality, test coverage, pattern consistency, type safety.',
-              'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
-            ].join('\n'),
-            dependsOn: ['implement'],
-            gate: {
-              validate: (o: unknown) => {
-                if (typeof o === 'string' && o !== TOOL_CALL_PLACEHOLDER && o.length > 20) return true;
-                const agentPulses = pulseCollector.getByAgent(revName);
-                return agentPulses.some(p => p.phase === 'done');
-              },
-              description: 'Reviewer must produce a substantive review or emit a done pulse',
-            },
-            timeout: 300_000,
-          },
-        ];
+          timeout: 300_000,
+        });
 
         const implPipelineDeps: PipelineRunnerDeps = {
           ...pipelineDeps,
@@ -854,6 +814,33 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             : 'Pipeline failed. Check phase results.',
           blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
         }));
+
+        // Auto-Sage: fire-and-forget post-processing after pipeline completion.
+        // Runs AFTER the "done" pulse so squad_wait is not blocked.
+        const autoAnalyze = options.squadConfig?.autoAnalyze ?? false;
+        process.stderr.write(`[squad] auto-sage: autoAnalyze=${String(autoAnalyze)}, pipelineStatus=${implState.status}\n`);
+        if (implState.status === 'completed' && autoAnalyze) {
+          const autoMgr = server.getSessionManager();
+          if (!autoMgr) {
+            process.stderr.write('[squad] auto-sage: skipped — session manager unavailable\n');
+          } else {
+            triggerAutoSageAnalysis({
+              pulseCollector,
+              listActiveSessions: () => autoMgr.listActiveSessions(),
+              getMessages: (agentName: string) => autoMgr.getMessages(agentName),
+              dispatch: async (agentName: string, message: string, context?: string) => {
+                const result = await server.dispatch(agentName, message, context);
+                const msgs = autoMgr.getMessages(agentName);
+                const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
+                return { response: lastReply?.content ?? undefined };
+              },
+              squadRoot: options.squadRoot,
+            }).catch((err: unknown) => {
+              // Auto-analysis errors are non-fatal but must not be silent
+              process.stderr.write(`[squad] auto-sage: triggerAutoSageAnalysis failed: ${err instanceof Error ? err.message : String(err)}\n`);
+            });
+          }
+        }
       }).catch((err) => {
         pulseCollector.record(createPulse({
           agent: 'ben', phase: 'blocked', status: 'error', progressPct: 100,
@@ -1296,7 +1283,15 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // --- Start dashboard HTTP server ---
-  const dashPort = parseInt(process.env['SQUAD_DASHBOARD_PORT'] ?? '3850', 10);
+  const envPort = process.env['SQUAD_DASHBOARD_PORT']
+    ? parseInt(process.env['SQUAD_DASHBOARD_PORT'], 10)
+    : undefined;
+  const configPort = options.squadConfig?.dashboardPort;
+  const dashPort = await resolveDashboardPort({
+    squadRoot: options.squadRoot,
+    configPort: typeof configPort === 'number' ? configPort : undefined,
+    envPort: Number.isNaN(envPort) ? undefined : envPort,
+  });
   const dashboardPath = path.resolve(
     path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1')),
     '..', '..', '..', 'squad-cli', 'src', 'dashboard', 'index.html',
@@ -1398,6 +1393,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       const addr = dashServer!.address();
       const actualPort = typeof addr === 'object' && addr ? addr.port : dashPort;
       dashboardUrl = `http://localhost:${actualPort}`;
+      persistPort(options.squadRoot, actualPort);
       process.stderr.write(`[squad-mcp] Dashboard: ${dashboardUrl}\n`);
     });
     dashServer.on('error', (err: any) => {
@@ -1407,6 +1403,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           const addr = dashServer!.address();
           const actualPort = typeof addr === 'object' && addr ? addr.port : 0;
           dashboardUrl = `http://localhost:${actualPort}`;
+          persistPort(options.squadRoot, actualPort);
           process.stderr.write(`[squad-mcp] Dashboard: ${dashboardUrl}\n`);
         });
       }

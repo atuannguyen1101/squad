@@ -132,22 +132,42 @@ const COORDINATOR_CHARTER = `# Coordinator — Work Router
 - Reading routing.md and team.md to understand who handles what
 - Matching a task description to the best available agents
 - Returning a structured routing decision
+- Decomposing multi-part tasks into parallel subtasks when the parts are independent
 
 ## How I Work
 
 - I receive Ben's understood intent summary
 - I read routing.md (via squad_read_session or provided context) to know the routing rules
 - I read the agent roster to know who is available
-- I return a JSON object with: implementer (agent name), reviewer (agent name), architect (agent name or null)
+- For **simple tasks** (one concern, one domain), I return a single-agent format
+- For **multi-part tasks** (independent parts that different agents can handle in parallel), I decompose into subtasks
 - I NEVER implement, review, or write code
 - I ALWAYS respond with ONLY a JSON object, nothing else
 
 ## Response Format
 
-Always respond with exactly this JSON structure:
+### Simple task — single implementer:
 \`\`\`json
 {"implementer": "agent_name", "reviewer": "agent_name", "architect": null}
 \`\`\`
+
+### Multi-part task — parallel subtasks:
+Use this format ONLY when the task has clearly independent parts that different agents can work on simultaneously.
+Each subtask must be a self-contained unit of work. Assign a different agent to each subtask when possible.
+\`\`\`json
+{"subtasks": [{"agent": "agent_a", "task": "description of part 1"}, {"agent": "agent_b", "task": "description of part 2"}], "reviewer": "agent_name"}
+\`\`\`
+
+### When to decompose:
+- The task mentions multiple independent features or changes
+- Different parts map to different agent expertise areas
+- The parts can be worked on without sequential dependency between them
+
+### When NOT to decompose:
+- The task is a single feature, even if complex
+- The parts are tightly coupled (part 2 depends on part 1's output)
+- Only one agent in the roster is qualified for the work
+- When in doubt, use the simple single-agent format
 
 ## Model
 
@@ -183,8 +203,8 @@ export const BUILT_IN_ACTORS: Record<string, BuiltInActor> = {
     expertise: ['Run analysis', 'agentic setup optimization', 'charter quality', 'routing accuracy'],
     style: 'Analytical, evidence-based, proposes concrete changes.',
     charter: SAGE_CHARTER,
-    // Sage analyzes and proposes — reads sessions, records decisions, no dispatch or file access.
-    allowedTools: ['squad_pulse', 'squad_read_session', 'squad_status', 'squad_decide', 'squad_memory', 'squad_skill'],
+    // Sage analyzes and proposes — reads sessions, records decisions and proposals, no dispatch or file access.
+    allowedTools: ['squad_pulse', 'squad_read_session', 'squad_status', 'squad_decide', 'squad_memory', 'squad_skill', 'squad_proposals'],
   },
 };
 

@@ -135,6 +135,49 @@ export interface ScratchpadListRequest {
   tag?: string;
 }
 
+// --- Proposal Types ---
+
+export type ProposalStatus = 'pending' | 'approved' | 'rejected';
+export type ProposalPriority = 'low' | 'medium' | 'high' | 'critical';
+
+export interface ProposalRecord {
+  /** Proposal title */
+  title: string;
+  /** Category (e.g. "performance", "architecture", "testing", "documentation") */
+  category: string;
+  /** Target file or module this proposal affects */
+  targetFile: string;
+  /** Detailed description of the proposed improvement */
+  description: string;
+  /** Evidence or rationale supporting this proposal */
+  evidence: string;
+  /** Priority level */
+  priority: ProposalPriority;
+  /** Author agent name */
+  author?: string;
+}
+
+export interface ProposalActionRequest {
+  /** Operation to perform */
+  operation: 'create' | 'list' | 'update';
+
+  // --- Fields for 'create' ---
+  /** Proposal data (required for 'create') */
+  proposal?: ProposalRecord;
+
+  // --- Fields for 'list' ---
+  /** Filter by status (default: 'pending') */
+  statusFilter?: ProposalStatus;
+
+  // --- Fields for 'update' ---
+  /** Proposal filename to update (required for 'update') */
+  proposalFile?: string;
+  /** New status (required for 'update') */
+  newStatus?: 'approved' | 'rejected';
+  /** Optional reviewer comment */
+  reviewComment?: string;
+}
+
 // --- Tool Definition Helper ---
 
 /**
@@ -902,6 +945,244 @@ export class ToolRegistry {
       },
     });
     this.tools.set('squad_scratchpad_list', squadScratchpadList);
+
+    // squad_proposals: Manage improvement proposals from Sage
+    const squadProposals = defineTool<ProposalActionRequest>({
+      name: 'squad_proposals',
+      description: 'Manage improvement proposals. Create proposals from Sage analysis, list pending proposals, or approve/reject them. Proposals are stored as markdown files in .squad/proposals/.',
+      parameters: {
+        type: 'object',
+        properties: {
+          operation: {
+            type: 'string',
+            enum: ['create', 'list', 'update'],
+            description: 'Operation to perform: create a new proposal, list existing proposals, or update (approve/reject) a proposal',
+          },
+          proposal: {
+            type: 'object',
+            description: 'Proposal data (required for create operation)',
+            properties: {
+              title: { type: 'string', description: 'Proposal title' },
+              category: { type: 'string', description: 'Category (e.g. performance, architecture, testing, documentation)' },
+              targetFile: { type: 'string', description: 'Target file or module this proposal affects' },
+              description: { type: 'string', description: 'Detailed description of the proposed improvement' },
+              evidence: { type: 'string', description: 'Evidence or rationale supporting this proposal' },
+              priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'], description: 'Priority level' },
+              author: { type: 'string', description: 'Author agent name (defaults to Sage)' },
+            },
+            required: ['title', 'category', 'targetFile', 'description', 'evidence', 'priority'],
+          },
+          statusFilter: {
+            type: 'string',
+            enum: ['pending', 'approved', 'rejected'],
+            description: 'Filter proposals by status (default: pending). Used with list operation.',
+          },
+          proposalFile: {
+            type: 'string',
+            description: 'Proposal filename to update (required for update operation)',
+          },
+          newStatus: {
+            type: 'string',
+            enum: ['approved', 'rejected'],
+            description: 'New status for the proposal (required for update operation)',
+          },
+          reviewComment: {
+            type: 'string',
+            description: 'Optional reviewer comment when approving/rejecting',
+          },
+        },
+        required: ['operation'],
+      },
+      handler: async (args) => {
+        const proposalsDir = path.join(this.squadRoot, '.squad', 'proposals');
+
+        switch (args.operation) {
+          case 'create': {
+            if (!args.proposal) {
+              return {
+                textResultForLlm: 'Error: proposal data is required for create operation',
+                resultType: 'failure' as const,
+                error: 'Missing proposal data',
+              };
+            }
+            const p = args.proposal;
+            if (!p.title || !p.category || !p.targetFile || !p.description || !p.evidence || !p.priority) {
+              return {
+                textResultForLlm: 'Error: proposal requires title, category, targetFile, description, evidence, and priority',
+                resultType: 'failure' as const,
+                error: 'Incomplete proposal data',
+              };
+            }
+
+            fs.mkdirSync(proposalsDir, { recursive: true });
+
+            const timestamp = new Date().toISOString();
+            const fileTimestamp = timestamp.replace(/[:.]/g, '-').slice(0, 19);
+            const slug = p.title
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '-')
+              .replace(/^-|-$/g, '')
+              .slice(0, 50);
+            const filename = `${fileTimestamp}-${slug}.md`;
+            const filepath = path.join(proposalsDir, filename);
+            const author = p.author || 'Sage';
+
+            const content = [
+              `# ${p.title}`,
+              '',
+              `| Field | Value |`,
+              `|-------|-------|`,
+              `| **Status** | pending |`,
+              `| **Category** | ${p.category} |`,
+              `| **Priority** | ${p.priority} |`,
+              `| **Target File** | ${p.targetFile} |`,
+              `| **Author** | ${author} |`,
+              `| **Created** | ${timestamp} |`,
+              '',
+              `## Description`,
+              '',
+              p.description,
+              '',
+              `## Evidence`,
+              '',
+              p.evidence,
+              '',
+            ].join('\n');
+
+            fs.writeFileSync(filepath, content, 'utf-8');
+
+            return {
+              textResultForLlm: `Proposal created: ${filename} — "${p.title}" (${p.priority} priority, ${p.category})`,
+              resultType: 'success' as const,
+              toolTelemetry: { filename, title: p.title, category: p.category, priority: p.priority, author },
+            };
+          }
+
+          case 'list': {
+            if (!fs.existsSync(proposalsDir)) {
+              return {
+                textResultForLlm: 'No proposals found. The .squad/proposals/ directory does not exist yet.',
+                resultType: 'success' as const,
+              };
+            }
+
+            const files = fs.readdirSync(proposalsDir).filter(f => f.endsWith('.md'));
+            if (files.length === 0) {
+              return {
+                textResultForLlm: 'No proposals found in .squad/proposals/.',
+                resultType: 'success' as const,
+              };
+            }
+
+            const statusFilter = args.statusFilter || 'pending';
+            const proposals: { file: string; title: string; status: string; priority: string; category: string; targetFile: string }[] = [];
+
+            for (const file of files) {
+              const content = fs.readFileSync(path.join(proposalsDir, file), 'utf-8');
+              const statusMatch = content.match(/\|\s*\*\*Status\*\*\s*\|\s*(\w+)\s*\|/);
+              const status = statusMatch?.[1] ?? 'unknown';
+              if (status !== statusFilter) continue;
+
+              const titleMatch = content.match(/^#\s+(.+)$/m);
+              const priorityMatch = content.match(/\|\s*\*\*Priority\*\*\s*\|\s*(\w+)\s*\|/);
+              const categoryMatch = content.match(/\|\s*\*\*Category\*\*\s*\|\s*([^|]+)\s*\|/);
+              const targetMatch = content.match(/\|\s*\*\*Target File\*\*\s*\|\s*([^|]+)\s*\|/);
+
+              proposals.push({
+                file,
+                title: titleMatch?.[1]?.trim() ?? file,
+                status,
+                priority: priorityMatch?.[1]?.trim() ?? 'unknown',
+                category: categoryMatch?.[1]?.trim() ?? 'unknown',
+                targetFile: targetMatch?.[1]?.trim() ?? 'unknown',
+              });
+            }
+
+            if (proposals.length === 0) {
+              return {
+                textResultForLlm: `No ${statusFilter} proposals found. ${files.length} total proposals in .squad/proposals/.`,
+                resultType: 'success' as const,
+              };
+            }
+
+            const listing = proposals.map(p =>
+              `- **${p.title}** [${p.priority}] (${p.category}) → ${p.targetFile}\n  File: ${p.file}`,
+            ).join('\n');
+
+            return {
+              textResultForLlm: `${proposals.length} ${statusFilter} proposal(s):\n\n${listing}`,
+              resultType: 'success' as const,
+              toolTelemetry: { count: proposals.length, statusFilter },
+            };
+          }
+
+          case 'update': {
+            if (!args.proposalFile) {
+              return {
+                textResultForLlm: 'Error: proposalFile is required for update operation',
+                resultType: 'failure' as const,
+                error: 'Missing proposalFile',
+              };
+            }
+            if (!args.newStatus || (args.newStatus !== 'approved' && args.newStatus !== 'rejected')) {
+              return {
+                textResultForLlm: 'Error: newStatus must be "approved" or "rejected"',
+                resultType: 'failure' as const,
+                error: 'Invalid newStatus',
+              };
+            }
+
+            const filepath = path.join(proposalsDir, args.proposalFile);
+            if (!fs.existsSync(filepath)) {
+              return {
+                textResultForLlm: `Error: Proposal file not found: ${args.proposalFile}`,
+                resultType: 'failure' as const,
+                error: 'Proposal file not found',
+              };
+            }
+
+            let content = fs.readFileSync(filepath, 'utf-8');
+
+            // Update the status field in the metadata table
+            content = content.replace(
+              /(\|\s*\*\*Status\*\*\s*\|\s*)\w+(\s*\|)/,
+              `$1${args.newStatus}$2`,
+            );
+
+            // Append review section
+            const reviewTimestamp = new Date().toISOString();
+            const reviewSection = [
+              '',
+              `## Review`,
+              '',
+              `| Field | Value |`,
+              `|-------|-------|`,
+              `| **Decision** | ${args.newStatus} |`,
+              `| **Reviewed** | ${reviewTimestamp} |`,
+              args.reviewComment ? `| **Comment** | ${args.reviewComment} |` : '',
+              '',
+            ].filter(Boolean).join('\n');
+
+            content += reviewSection;
+            fs.writeFileSync(filepath, content, 'utf-8');
+
+            return {
+              textResultForLlm: `Proposal ${args.newStatus}: ${args.proposalFile}${args.reviewComment ? ` — "${args.reviewComment}"` : ''}`,
+              resultType: 'success' as const,
+              toolTelemetry: { proposalFile: args.proposalFile, newStatus: args.newStatus },
+            };
+          }
+
+          default:
+            return {
+              textResultForLlm: `Error: Unknown operation "${args.operation}". Use "create", "list", or "update".`,
+              resultType: 'failure' as const,
+              error: `Unknown operation: ${args.operation}`,
+            };
+        }
+      },
+    });
+    this.tools.set('squad_proposals', squadProposals);
   }
 
   /** Get all registered tools for session config */

@@ -12,6 +12,13 @@ export interface SquadConfig {
   hooks?: HooksConfig;
   ceremonies?: CeremonyConfig[];
   plugins?: PluginConfig;
+  /**
+   * Automatically run Sage analysis after each pipeline completes.
+   * When true, the analysis report is generated and dispatched to Sage
+   * for interpretation as post-processing (does not block pipeline completion).
+   * @default false
+   */
+  autoAnalyze?: boolean;
 }
 
 export interface TeamConfig {

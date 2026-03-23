@@ -137,23 +137,18 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 | Gate Validation Fix | `src/pipeline/runner.ts` | extractResponseContent helper, TOOL_CALL_PLACEHOLDER for tool-call-only responses, pulse-aware gates |
 | Pipeline Done-Pulse Wait | `src/mcp/server.ts` | implPipelineDeps waits for agent done pulse before evaluating gate, via PulseCollector.waitForDonePulse() |
 | Pipeline Completion Signal | `src/mcp/server.ts` | understand+route onPipelineComplete emits phase:'implementing' not phase:'done'. Real done pulse after impl+review finishes |
-| Unit Tests | `test/pipeline.test.ts`, `test/pulse.test.ts`, `test/intent-graph.test.ts`, `test/built-in-actors.test.ts`, `test/context-window.test.ts`, `test/scratchpad.test.ts`, `test/built-in-actor-tools.test.ts` | 167/167 passing (across 10 test files) |
+| Auto-Sage Trigger | `src/mcp/auto-sage.ts` | Fires after pipeline completion when autoAnalyze:true in squad.config.json, dispatches to Sage agent (31 tests) |
+| Dashboard Port Stability | `src/mcp/dashboard-port.ts` | Port persisted to .squad/.mcp-port, dashboardPort config option, .gitignore updated (23 tests) |
+| Proposal Application Workflow | `src/tools/index.ts` | squad_proposals MCP tool with create/list/update operations for Sage proposals in .squad/proposals/ (14 tests) |
+| Parallel Task Decomposition | `src/pipeline/routing-parser.ts` | Coordinator can decompose multi-part tasks into parallel subtasks with different agents (61 tests) |
+| Routing Parser | `src/pipeline/routing-parser.ts` | Extracted routing response parsing and phase generation into reusable module |
+| Unit Tests | `test/pipeline.test.ts`, `test/pulse.test.ts`, `test/intent-graph.test.ts`, `test/built-in-actors.test.ts`, `test/context-window.test.ts`, `test/scratchpad.test.ts`, `test/built-in-actor-tools.test.ts`, `test/auto-sage.test.ts`, `test/dashboard-port.test.ts`, `test/proposals.test.ts`, `test/routing-parser.test.ts` | 296/296 passing (across 14 test files) |
 
 ## What's Incomplete
 
 | Item | Impact |
 |------|--------|
-| ~~Pipeline understand phase vs Q&A loop~~ | **FIXED** — waitForResponse now detects pending user questions and waits for Q&A resolution before accepting a response |
-| Intent Graph not updated mid-run | Ben creates it once, never maintains it |
-| ~~Context windowing~~ | **BUILT** — Auto-summarize old messages, wired into agent-lifecycle.ts dispatch (21 tests) |
-| ~~Shared scratchpad~~ | **BUILT** — 3 SquadTools registered, cleared between runs (34 tests) |
-| ~~Concurrent `squad_run` race~~ | **FIXED** -- activeRunId guard rejects concurrent calls; cleared on completion or cancel |
-| ~~`squad_cancel`~~ | **BUILT** — cancels all active pipelines, closes sessions, resolves waiters |
-| ~~MCP wiring tests~~ | **BUILT** -- 10 integration tests covering Q&A loop, cancel, concurrent guard, pulse-to-wait |
-| Sage end-to-end test | Analysis engine works (13 tests), but no end-to-end dispatch-to-Sage test |
-| Dashboard port stability | Port changes on restart if old process didn't fully exit |
-| Proposal application workflow for Sage | Sage produces proposals but no workflow to apply them |
-| Automatic post-run Sage trigger | Sage must be called explicitly via `squad_analyze_run` |
+| Intent Graph not updated mid-run | Ben creates it once, never maintains it (low priority) |
 
 ## Session Log (2026-03-22, Session 3)
 
@@ -173,21 +168,30 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 
 7. **Sage analysis engine tests**: Added 13 tests to `test/analyze-run.test.ts` covering proposal generation, scope validation, run efficiency analysis, and improvement recommendations. Analysis engine works correctly. End-to-end dispatch-to-Sage test still needed.
 
-8. **Type check clean**: `tsc --noEmit` passes with zero errors. All 167 tests pass across 10 test files.
+8. **Auto-Sage trigger implementation**: Built automatic post-run Sage analysis trigger in `src/mcp/auto-sage.ts`. Fires after pipeline completion when `autoAnalyze: true` in `squad.config.json`. Dispatches to Sage agent with full pulse history and session context. Added 31 tests covering trigger logic, error handling, and config flag behavior. Fixed 3 bugs during implementation:
+   - **Error swallowing**: Agent errors weren't properly captured in analysis context
+   - **Config visibility**: autoAnalyze flag wasn't passed through pipeline runner options
+   - **Tool access**: Sage was missing squad_proposals tool for writing proposals
+
+9. **Dashboard port stability**: Implemented persistent port allocation in `src/mcp/dashboard-port.ts`. Port persisted to `.squad/.mcp-port` and read on restart. Added `dashboardPort` config option in `squad.config.json` for explicit port setting. Updated `.gitignore` to exclude `.squad/.mcp-port`. Added 23 tests covering port persistence, fallback behavior, and configuration override.
+
+10. **Proposal application workflow**: Built `squad_proposals` MCP tool with create/list/update operations for Sage proposals in `.squad/proposals/` directory. Proposals stored as markdown files with structured frontmatter (status, category, priority, author, created/updated dates). Added 14 tests covering proposal CRUD operations, directory initialization, and frontmatter parsing.
+
+11. **Parallel task decomposition**: Extended routing parser to support multi-part tasks with parallel execution. Coordinator can now decompose tasks into subtasks with different agents running in parallel. Implemented in `src/pipeline/routing-parser.ts` with phase dependency tracking. Added 61 tests covering task parsing, dependency resolution, parallel layer generation, and validation.
+
+12. **Routing parser extraction**: Extracted routing response parsing and phase generation into reusable module at `src/pipeline/routing-parser.ts`. Cleaned up `server.ts` by moving complex parsing logic into dedicated module with comprehensive test coverage.
+
+13. **Type check clean**: `tsc --noEmit` passes with zero errors. All 296 tests pass across 14 test files.
 
 ### What the next session should do
 
-**Priority 1: Sage end-to-end dispatch test**
-Build a test that calls `squad_analyze_run` and verifies Sage as a dispatched agent produces a complete analysis report. Current tests verify the analysis engine logic but not the full Sage charter + dispatch flow.
+All major features from "What's Incomplete" are now resolved except Intent Graph mid-run updates (low priority). Focus areas for next session:
 
-**Priority 2: Proposal application workflow**
-Design and implement workflow for applying Sage's proposals. Options: auto-create GitHub issues, write proposal files to `.squad/proposals/`, or integrate with existing PR review flow.
+**End-to-end validation**: Run full pipeline with auto-Sage trigger enabled and verify all components work together seamlessly.
 
-**Priority 3: Automatic post-run Sage trigger**
-Add optional auto-trigger to `squad_run` completion. Config option: `autoAnalyze: boolean` in `squad.config.ts`. When enabled, automatically call `squad_analyze_run` after pipeline completes.
+**Documentation**: Update Squad SDK docs to explain auto-Sage trigger, proposal workflow, and parallel task decomposition patterns.
 
-**Priority 4: Dashboard port stability**
-Fix port allocation to persist across restarts. Options: write port to `.squad/.mcp-port`, retry logic with exponential backoff, or explicit port configuration in `squad.config.ts`.
+**Production readiness**: Run load tests, verify error handling under failure scenarios, and validate production deployment configuration.
 
 ## Session Log (2026-03-22, Session 2)
 

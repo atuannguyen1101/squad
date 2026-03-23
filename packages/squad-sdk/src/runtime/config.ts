@@ -306,6 +306,22 @@ export interface SquadConfig {
   
   /** Ceremony configurations for post-pipeline auto-dispatch */
   ceremonies?: import('../config/schema.js').CeremonyConfig[];
+
+  /**
+   * Automatically run Sage analysis after each pipeline completes.
+   * When true, the analysis report is generated and dispatched to Sage
+   * for interpretation as post-processing (does not block pipeline completion).
+   * @default false
+   */
+  autoAnalyze?: boolean;
+
+  /**
+   * Explicit port for the MCP dashboard HTTP server.
+   * When set, the dashboard will always attempt this port first.
+   * If omitted, falls back to SQUAD_DASHBOARD_PORT env var, persisted
+   * port from .squad/.mcp-port, or the default (3850).
+   */
+  dashboardPort?: number;
   
   /** Custom extensions */
   [key: string]: unknown;

@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { ToolRegistry, defineTool, type RouteRequest, type DecisionRecord, type MemoryEntry } from '@bradygaster/squad-sdk/tools';
+import { ToolRegistry, defineTool, type RouteRequest, type DecisionRecord, type MemoryEntry, type ProposalActionRequest } from '@bradygaster/squad-sdk/tools';
 import { SessionPool } from '@bradygaster/squad-sdk/client';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -80,7 +80,7 @@ describe('ToolRegistry', () => {
   describe('registration', () => {
     it('should register all squad tools', () => {
       const tools = registry.getTools();
-      expect(tools.length).toBe(11);
+      expect(tools.length).toBe(12);
 
       const toolNames = tools.map(t => t.name);
       expect(toolNames).toContain('squad_route');
@@ -94,6 +94,7 @@ describe('ToolRegistry', () => {
       expect(toolNames).toContain('squad_scratchpad_write');
       expect(toolNames).toContain('squad_scratchpad_read');
       expect(toolNames).toContain('squad_scratchpad_list');
+      expect(toolNames).toContain('squad_proposals');
     });
 
     it('should register tools with descriptions and parameters', () => {
@@ -109,7 +110,7 @@ describe('ToolRegistry', () => {
     it('should return all registered tools', () => {
       const tools = registry.getTools();
       expect(Array.isArray(tools)).toBe(true);
-      expect(tools.length).toBe(11);
+      expect(tools.length).toBe(12);
     });
 
     it('should return tools with handler functions', () => {
@@ -123,7 +124,7 @@ describe('ToolRegistry', () => {
   describe('getToolsForAgent', () => {
     it('should return all tools when no filter provided', () => {
       const tools = registry.getToolsForAgent();
-      expect(tools.length).toBe(11);
+      expect(tools.length).toBe(12);
     });
 
     it('should filter tools by allowed list', () => {
@@ -715,5 +716,412 @@ describe('squad_skill handler', () => {
     const skillFile = path.join(testRoot, 'skills', 'test-skill', 'SKILL.md');
     const content = fs.readFileSync(skillFile, 'utf-8');
     expect(content).toContain('**Confidence:** medium');
+  });
+});
+
+// --- squad_proposals tests ---
+
+describe('squad_proposals handler', () => {
+  let registry: ToolRegistry;
+  let testRoot: string;
+  const invocation = {
+    sessionId: 'test-session',
+    toolCallId: 'test-call',
+    toolName: 'squad_proposals',
+    arguments: {},
+  };
+
+  beforeEach(() => {
+    testRoot = path.join('.', '.test-squad-proposals-' + randomUUID());
+    registry = new ToolRegistry(testRoot);
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(testRoot)) {
+      fs.rmSync(testRoot, { recursive: true, force: true });
+    }
+  });
+
+  describe('create operation', () => {
+    it('should create a proposal markdown file', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+      const result = await tool.handler(
+        {
+          operation: 'create',
+          proposal: {
+            title: 'Add caching layer',
+            category: 'performance',
+            targetFile: 'src/runtime/coordinator.ts',
+            description: 'Add an LRU cache to reduce redundant file reads during casting.',
+            evidence: 'Profiling shows 40% of time spent in repeated fs.readFileSync calls.',
+            priority: 'high',
+          },
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      expect(result).toMatchObject({ resultType: 'success' });
+      expect((result as any).textResultForLlm).toContain('Add caching layer');
+      expect((result as any).textResultForLlm).toContain('high');
+
+      const proposalsDir = path.join(testRoot, '.squad', 'proposals');
+      expect(fs.existsSync(proposalsDir)).toBe(true);
+
+      const files = fs.readdirSync(proposalsDir);
+      expect(files.length).toBe(1);
+      expect(files[0]).toMatch(/add-caching-layer\.md$/);
+
+      const content = fs.readFileSync(path.join(proposalsDir, files[0]!), 'utf-8');
+      expect(content).toContain('# Add caching layer');
+      expect(content).toContain('| **Status** | pending |');
+      expect(content).toContain('| **Category** | performance |');
+      expect(content).toContain('| **Priority** | high |');
+      expect(content).toContain('| **Target File** | src/runtime/coordinator.ts |');
+      expect(content).toContain('| **Author** | Sage |');
+      expect(content).toContain('## Description');
+      expect(content).toContain('LRU cache');
+      expect(content).toContain('## Evidence');
+      expect(content).toContain('40% of time');
+    });
+
+    it('should use custom author when provided', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+      await tool.handler(
+        {
+          operation: 'create',
+          proposal: {
+            title: 'Refactor tests',
+            category: 'testing',
+            targetFile: 'test/tools.test.ts',
+            description: 'Split test file into per-tool test modules.',
+            evidence: 'Test file exceeds 700 lines and is hard to navigate.',
+            priority: 'medium',
+            author: 'FIDO',
+          },
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      const proposalsDir = path.join(testRoot, '.squad', 'proposals');
+      const files = fs.readdirSync(proposalsDir);
+      const content = fs.readFileSync(path.join(proposalsDir, files[0]!), 'utf-8');
+      expect(content).toContain('| **Author** | FIDO |');
+    });
+
+    it('should fail when proposal data is missing', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+      const result = await tool.handler(
+        { operation: 'create' } as ProposalActionRequest,
+        invocation,
+      );
+
+      expect(result).toMatchObject({ resultType: 'failure' });
+      expect((result as any).error).toBe('Missing proposal data');
+    });
+
+    it('should fail when proposal fields are incomplete', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+      const result = await tool.handler(
+        {
+          operation: 'create',
+          proposal: {
+            title: 'Incomplete proposal',
+            category: 'testing',
+            targetFile: '',
+            description: '',
+            evidence: '',
+            priority: 'low',
+          },
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      expect(result).toMatchObject({ resultType: 'failure' });
+      expect((result as any).error).toBe('Incomplete proposal data');
+    });
+  });
+
+  describe('list operation', () => {
+    it('should return empty when no proposals directory exists', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+      const result = await tool.handler(
+        { operation: 'list' } as ProposalActionRequest,
+        invocation,
+      );
+
+      expect(result).toMatchObject({ resultType: 'success' });
+      expect((result as any).textResultForLlm).toContain('does not exist');
+    });
+
+    it('should list pending proposals by default', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+
+      // Create two proposals
+      await tool.handler(
+        {
+          operation: 'create',
+          proposal: {
+            title: 'First proposal',
+            category: 'architecture',
+            targetFile: 'src/index.ts',
+            description: 'First improvement.',
+            evidence: 'Evidence one.',
+            priority: 'high',
+          },
+        } as ProposalActionRequest,
+        invocation,
+      );
+      await tool.handler(
+        {
+          operation: 'create',
+          proposal: {
+            title: 'Second proposal',
+            category: 'documentation',
+            targetFile: 'docs/guide.md',
+            description: 'Second improvement.',
+            evidence: 'Evidence two.',
+            priority: 'low',
+          },
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      const result = await tool.handler(
+        { operation: 'list' } as ProposalActionRequest,
+        invocation,
+      );
+
+      expect(result).toMatchObject({ resultType: 'success' });
+      expect((result as any).textResultForLlm).toContain('2 pending proposal(s)');
+      expect((result as any).textResultForLlm).toContain('First proposal');
+      expect((result as any).textResultForLlm).toContain('Second proposal');
+    });
+
+    it('should filter proposals by status', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+
+      // Create and approve one proposal
+      await tool.handler(
+        {
+          operation: 'create',
+          proposal: {
+            title: 'Approved proposal',
+            category: 'testing',
+            targetFile: 'test/foo.test.ts',
+            description: 'Will be approved.',
+            evidence: 'Evidence.',
+            priority: 'medium',
+          },
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      const proposalsDir = path.join(testRoot, '.squad', 'proposals');
+      const files = fs.readdirSync(proposalsDir);
+
+      await tool.handler(
+        {
+          operation: 'update',
+          proposalFile: files[0],
+          newStatus: 'approved',
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      // List approved — should find 1
+      const approvedResult = await tool.handler(
+        { operation: 'list', statusFilter: 'approved' } as ProposalActionRequest,
+        invocation,
+      );
+      expect((approvedResult as any).textResultForLlm).toContain('1 approved proposal(s)');
+
+      // List pending — should find 0
+      const pendingResult = await tool.handler(
+        { operation: 'list', statusFilter: 'pending' } as ProposalActionRequest,
+        invocation,
+      );
+      expect((pendingResult as any).textResultForLlm).toContain('No pending proposals');
+    });
+  });
+
+  describe('update operation', () => {
+    it('should approve a pending proposal', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+
+      // Create a proposal first
+      await tool.handler(
+        {
+          operation: 'create',
+          proposal: {
+            title: 'Proposal to approve',
+            category: 'performance',
+            targetFile: 'src/casting.ts',
+            description: 'Optimize casting.',
+            evidence: 'Benchmarks show 2x improvement.',
+            priority: 'high',
+          },
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      const proposalsDir = path.join(testRoot, '.squad', 'proposals');
+      const files = fs.readdirSync(proposalsDir);
+
+      const result = await tool.handler(
+        {
+          operation: 'update',
+          proposalFile: files[0],
+          newStatus: 'approved',
+          reviewComment: 'Looks good, ship it!',
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      expect(result).toMatchObject({ resultType: 'success' });
+      expect((result as any).textResultForLlm).toContain('approved');
+      expect((result as any).textResultForLlm).toContain('Looks good, ship it!');
+
+      const content = fs.readFileSync(path.join(proposalsDir, files[0]!), 'utf-8');
+      expect(content).toContain('| **Status** | approved |');
+      expect(content).toContain('## Review');
+      expect(content).toContain('| **Decision** | approved |');
+      expect(content).toContain('| **Comment** | Looks good, ship it! |');
+    });
+
+    it('should reject a pending proposal', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+
+      await tool.handler(
+        {
+          operation: 'create',
+          proposal: {
+            title: 'Proposal to reject',
+            category: 'architecture',
+            targetFile: 'src/tools/index.ts',
+            description: 'Split tools into separate files.',
+            evidence: 'File is large.',
+            priority: 'low',
+          },
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      const proposalsDir = path.join(testRoot, '.squad', 'proposals');
+      const files = fs.readdirSync(proposalsDir);
+
+      const result = await tool.handler(
+        {
+          operation: 'update',
+          proposalFile: files[0],
+          newStatus: 'rejected',
+          reviewComment: 'Not a priority right now.',
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      expect(result).toMatchObject({ resultType: 'success' });
+      expect((result as any).textResultForLlm).toContain('rejected');
+
+      const content = fs.readFileSync(path.join(proposalsDir, files[0]!), 'utf-8');
+      expect(content).toContain('| **Status** | rejected |');
+      expect(content).toContain('| **Decision** | rejected |');
+    });
+
+    it('should fail when proposalFile is missing', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+      const result = await tool.handler(
+        {
+          operation: 'update',
+          newStatus: 'approved',
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      expect(result).toMatchObject({ resultType: 'failure' });
+      expect((result as any).error).toBe('Missing proposalFile');
+    });
+
+    it('should fail when newStatus is invalid', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+      const result = await tool.handler(
+        {
+          operation: 'update',
+          proposalFile: 'some-file.md',
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      expect(result).toMatchObject({ resultType: 'failure' });
+      expect((result as any).error).toBe('Invalid newStatus');
+    });
+
+    it('should fail when proposal file does not exist', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+
+      // Ensure proposals dir exists
+      const proposalsDir = path.join(testRoot, '.squad', 'proposals');
+      fs.mkdirSync(proposalsDir, { recursive: true });
+
+      const result = await tool.handler(
+        {
+          operation: 'update',
+          proposalFile: 'nonexistent.md',
+          newStatus: 'approved',
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      expect(result).toMatchObject({ resultType: 'failure' });
+      expect((result as any).error).toBe('Proposal file not found');
+    });
+
+    it('should handle approval without review comment', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+
+      await tool.handler(
+        {
+          operation: 'create',
+          proposal: {
+            title: 'Silent approval',
+            category: 'testing',
+            targetFile: 'test/something.ts',
+            description: 'A small fix.',
+            evidence: 'Clear improvement.',
+            priority: 'low',
+          },
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      const proposalsDir = path.join(testRoot, '.squad', 'proposals');
+      const files = fs.readdirSync(proposalsDir);
+
+      await tool.handler(
+        {
+          operation: 'update',
+          proposalFile: files[0],
+          newStatus: 'approved',
+        } as ProposalActionRequest,
+        invocation,
+      );
+
+      const content = fs.readFileSync(path.join(proposalsDir, files[0]!), 'utf-8');
+      expect(content).toContain('| **Status** | approved |');
+      expect(content).toContain('| **Decision** | approved |');
+      expect(content).not.toContain('| **Comment**');
+    });
+  });
+
+  describe('unknown operation', () => {
+    it('should fail with unknown operation error', async () => {
+      const tool = registry.getTool('squad_proposals')!;
+      const result = await tool.handler(
+        { operation: 'delete' as any } as ProposalActionRequest,
+        invocation,
+      );
+
+      expect(result).toMatchObject({ resultType: 'failure' });
+      expect((result as any).error).toContain('Unknown operation');
+    });
   });
 });
