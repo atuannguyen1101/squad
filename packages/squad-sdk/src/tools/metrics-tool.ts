@@ -50,9 +50,9 @@ export function createMetricsTool(metricsTracker: MetricsTracker): SquadTool<Met
         // Get metrics
         const allMetrics = metricsTracker.getAllMetrics();
         
-        // Filter by agent name if provided
+        // Filter by agent name if provided (case-insensitive)
         const filteredMetrics = args.agentName
-          ? allMetrics.filter(m => m.agentName === args.agentName)
+          ? allMetrics.filter(m => m.agentName.toLowerCase() === args.agentName!.toLowerCase())
           : allMetrics;
         
         if (filteredMetrics.length === 0) {

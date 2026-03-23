@@ -255,19 +255,48 @@ When a session context has file-creation tools disabled (e.g., sandbox restricti
 ### 2026-03-23
 
 - **Line count:** 30 files with changes. **First 30 lines (all changes):**
+### 2026-03-23
+
+- Since there's no `if(false)` pattern to refactor, let me now rebuild and test the changes I've made:
+### 2026-03-23
+
+- 3. Auto-pulse safety net — if an agent hasn't emitted a pulse in N seconds, auto-generate a "still working" pulse so squad_wait doesn't hang forever.
+- - If agent hasn't emitted pulse in 60 seconds, auto-generate "still working" pulse
+- - Auto-pulse format: phase="analyzing", status="ok", note="auto-generated"
+- Now let me add P1 #3 - Auto-pulse safety net. I need to add a method that generates a "still working" pulse if no pulse has been emitted for a while. Let me add this to the PulseCol...
 ## Decisions
+
 ### 2026-03-23
 
 - 1. I decided to use heuristic extraction instead of LLM calls for session learnings because it avoids API latency on session close.
+### 2026-03-23
 
+- I'll implement all P0, P1 issues, and cleanup items systematically.
+- Now I'll implement all the fixes.
+- I'll add a message count tracker to the PulseCollector.
 ## Patterns
+
 ### 2026-03-23
 
 - 3. We always use the pattern of event-bus subscriptions for lifecycle hooks — never direct function calls in closeSession.
 - Don't add API latency to the shutdown path. Use synchronous regex/pattern matching on conversation history to extract learnings — it's deterministic, fast, and doesn't depend on the model being availa
 - The compiled dist was missing an export that existed in the TypeScript source. Root cause is almost certainly tsc incremental build cache (see #4). Post-build, always ...
+### 2026-03-23
 
+- Now let me look at the tools registration to understand the tool hiding pattern:
+- It looks like the tool system already has a clean pattern with `getToolsForAgent` that filters by allowed tools.
+- There doesn't seem to be any `if(false)` pattern to refactor.
+- It looks like there's no `if(false)` pattern to refactor in our code.
+- Perhaps Strausz's review was referring to a different pattern or it was already fixed.
+### 2026-03-23
+
+- 6. Refactor if(false) tool hiding into a proper publicTools Set pattern.
+- - Refactor if(false) tool hiding into a proper pattern (e.g., a Set of public tool names, only register tools in that set)
+- Now let me look at the tools registration to understand the tool hiding pattern:
+- Let me check if there are any conditional tool registration patterns:
+- Let me continue looking for where tools are registered and see if there are any conditional patterns:
 ## Issues
+
 ### 2026-03-23
 
 - 2. The root cause of the server crash was that dist/intent/index.js was missing exports for createEmptyIntentGraph.
@@ -275,10 +304,27 @@ When a session context has file-creation tools disabled (e.g., sandbox restricti
 - 5. The workaround for file creation when tools are disabled is to use squad MCP agents who have their own tool access.
 - Good — the file exists, the tool just has a path resolution issue. I'll append directly.
 - When you add a new source file, tsc's incremental cac...
+### 2026-03-23
 
+- Now let me work on P0 #1 - Progress regression detection.
+- Let me create an updated version of pulse.ts with progress regression detection:
+- Now let me work on P0 #2 - Case-sensitivity bug.
+### 2026-03-23
+
+- Address all P0 and P1 issues from Sage's analysis, plus Strausz's review cleanup:
+- 2. Case-sensitivity bug in agent name matching — agent names should be matched case-insensitively throughout routing and dispatch.
+- 5. Delete repo root artifact files (SAGE_PROPOSALS_PRIORITY_SUMMARY.md, MCP_TOOL_VISIBILITY_IMPLEMENTATION.md, server.ts.backup, DASHBOARD-FIX-REPORT.md, PHASE1-VERIFICATION.md, squad-ben-fix-report.m
+- Also clean up the blocking issues from Strausz's review:
+- - Delete repo ro...
 ## References
+
 ### 2026-03-23
 
 Session artifacts:
 - When you add a new source file, tsc's incremental cache may not know about it and will silently skip emission even on a clean compile. Fix: delete `*.tsbuildinfo` before building if new files were add
 - When you add a new source file, tsc's incremental cache may not know about it and will silently skip emission even on a clean compile. Fix: delete `*.tsbuildinfo` before building if new files were add
+### 2026-03-23
+
+Session artifacts:
+- When done, emit squad_pulse with phase "done" listing the files you created or modified.
+- - Auto-pulse format: phase="analyzing", status="ok", note="auto-generated"

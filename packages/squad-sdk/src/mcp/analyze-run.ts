@@ -310,7 +310,8 @@ export function analyzeRun(input: RunAnalysisInput): RunAnalysisReport {
   // Build per-agent summaries
   const agents: AgentRunSummary[] = [];
   for (const name of agentNames) {
-    const session = sessions.find(s => s.agentName === name);
+    const lowerName = name.toLowerCase();
+    const session = sessions.find(s => s.agentName.toLowerCase() === lowerName);
     agents.push(summarizeAgent(name, pulses, session));
   }
 

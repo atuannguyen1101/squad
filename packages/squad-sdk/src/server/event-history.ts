@@ -44,7 +44,8 @@ export class EventHistory {
       filtered = filtered.filter(e => e.type.includes(filter.type!));
     }
     if (filter?.agentName) {
-      filtered = filtered.filter(e => e.agentName === filter.agentName);
+      const lowerAgentName = filter.agentName.toLowerCase();
+      filtered = filtered.filter(e => e.agentName?.toLowerCase() === lowerAgentName);
     }
     return filtered.slice(-count);
   }

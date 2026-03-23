@@ -104,12 +104,42 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   //   - squad_intent: Intent graph state management
   //   - squad_wait_for_idle: Internal coordination primitive
   //
-  // Internal tools are wrapped in `if (false)` blocks to keep the implementation
-  // intact while removing them from MCP discovery. They remain available to agents
+  // Public tools are registered on the MCP surface for Copilot discovery.
+  // Internal tools are defined but not registered - they remain available to agents
   // inside sessions through the SquadTools interface in src/tools/index.ts.
 
+  // Define which tools are exposed on the MCP surface
+  const publicTools = new Set([
+    'squad_run',
+    'squad_ask',
+    'squad_respond',
+    'squad_wait',
+    'squad_status',
+    'squad_cancel',
+    'squad_analyze_run',
+  ]);
+
+  // Helper to conditionally register tools based on visibility
+  const registerTool = (
+    schema: {
+      name: string;
+      description: string;
+      inputSchema: {
+        type: 'object';
+        properties: Record<string, any>;
+        required?: string[];
+      };
+    },
+    handler: (args: Record<string, any>) => Promise<{ content: Array<{ type: 'text'; text: string }> }>
+  ) => {
+    if (publicTools.has(schema.name)) {
+      mcp.addTool(schema, handler);
+    }
+    // Internal tools remain defined for documentation but are not registered
+  };
+
   // squad_dispatch: Send work to a named agent [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_dispatch',
       description: 'Send a task to a named squad agent. Creates or reuses a persistent session for the agent, compiles their charter, and sends the message. Use this when one agent needs another agent to do work.',
@@ -139,7 +169,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_status: Get server status
-  mcp.addTool(
+  registerTool(
     {
       name: 'squad_status',
       description: 'Get the current status of the Squad orchestration server, including active sessions, pool capacity, and agent details.',
@@ -194,7 +224,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_list_agents: List active agent sessions [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_list_agents',
       description: 'List all active agent sessions managed by the orchestration server.',
@@ -219,7 +249,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_close_session: Close a specific agent session [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_close_session',
       description: 'Close a specific agent session by agent name. The session will be removed from the pool.',
@@ -244,7 +274,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_monitor: Get recent server events for monitoring/debugging [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_monitor',
       description: 'Get recent server events and activity. Shows what agents have been doing, session lifecycle events, errors, and routing decisions. Use for monitoring and debugging.',
@@ -287,7 +317,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_roster: Discover available agents from .squad/agents/ [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_roster',
       description: 'List all available squad agents with their roles, expertise, and model preferences. Reads from .squad/agents/ charters. Use this to discover who is on the team before dispatching.',
@@ -353,7 +383,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   // --- Graceful shutdown ---
 
   // squad_send: Send a message and wait for the agent's response [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_send',
       description: 'Send a message to an existing agent session and wait for their response. Use this for synchronous back-and-forth communication between agents. The agent must already have an active session (created via squad_dispatch). Returns the agent\'s full response text.',
@@ -391,7 +421,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_read_session: Read an agent's conversation history [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_read_session',
       description: 'Read the conversation history of an agent session. Returns all messages (user dispatches and agent responses). Use this to check what an agent has done, read their output, or monitor progress.',
@@ -436,7 +466,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_decide: Record a team decision [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_decide',
       description: 'Record a team decision to .squad/decisions/inbox/. Decisions are reviewed and merged into decisions.md by the team. Use this when making architectural, design, or process choices that affect other agents.',
@@ -485,7 +515,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_memory: Append to agent history [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_memory',
       description: 'Append an entry to an agent\'s history file (.squad/agents/{name}/history.md). Use to record learnings, session outcomes, or important context for future sessions.',
@@ -573,7 +603,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   });
 
   // squad_run: Start a team run via Ben (user-facing entry point)
-  mcp.addTool(
+  registerTool(
     {
       name: 'squad_run',
       description: 'Start a team run through Ben, your team representative. Ben will understand your request, ask clarifying questions if needed, and coordinate the team. This is the primary entry point for all work requests.',
@@ -904,7 +934,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_ask: Send a follow-up message to Ben mid-run
-  mcp.addTool(
+  registerTool(
     {
       name: 'squad_ask',
       description: 'Send a follow-up message or answer to Ben during an active run. Use this to answer questions Ben asked, provide additional context, or change direction.',
@@ -948,7 +978,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_respond: Answer a specific question from the team
-  mcp.addTool(
+  registerTool(
     {
       name: 'squad_respond',
       description: 'Answer a pending question from the team. Use this when squad_wait returns questions that need your input.',
@@ -996,7 +1026,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_pulse: Agents emit structured status updates [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_pulse',
       description: 'Emit a structured status update (Pulse). Use this at milestones to report progress, ask questions, or signal completion. The coordinator will route user-relevant pulses to Ben automatically.',
@@ -1041,7 +1071,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_intent: Inspect the current intent graph [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_intent',
       description: 'Return the current Intent Graph for the active run. Shows the parsed goal, constraints, acceptance criteria, task assignments, and status. Useful for inspecting how the team understood your request.',
@@ -1070,7 +1100,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_wait: Block until something needs user attention
-  mcp.addTool(
+  registerTool(
     {
       name: 'squad_wait',
       description: 'Wait for a team event that needs your attention — a question from an agent, a milestone, an error, or run completion. Blocks until something happens or timeout. Use this instead of polling squad_status.',
@@ -1146,7 +1176,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_wait_for_idle: Block until all agent sessions are idle [INTERNAL - Not exposed on MCP]
-  if (false) mcp.addTool(
+  registerTool(
     {
       name: 'squad_wait_for_idle',
       description: 'Block until all agent sessions have been idle (no new messages) for the specified duration. Use this to wait for a pipeline run to complete before grading or processing results. Returns a summary of agents and messages when idle.',
@@ -1190,7 +1220,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_cancel: Cancel an active pipeline run
-  mcp.addTool(
+  registerTool(
     {
       name: 'squad_cancel',
       description: 'Cancel an active squad_run pipeline. Cancels all running phases, closes agent sessions, and returns a summary of what was completed before cancellation.',
@@ -1249,7 +1279,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   );
 
   // squad_analyze_run: Sage's post-run analysis tool
-  mcp.addTool(
+  registerTool(
     {
       name: 'squad_analyze_run',
       description: 'Analyze a completed Squad run. Reads pulse history and agent session messages, then produces a structured report with concrete improvement proposals for charters, routing rules, and SDK config. Intended for post-run retrospectives (Sage).',

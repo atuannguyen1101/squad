@@ -147,15 +147,22 @@ describe('MCP Tool Visibility', () => {
       expect(matches).toBeTruthy();
       expect(matches!.length).toBeGreaterThanOrEqual(1);
       
-      // Verify it's NOT preceded by "if (false)"
+      // Verify it uses registerTool (like internal tools)
       const toolSection = serverSource.substring(
         Math.max(0, serverSource.indexOf(`name: '${toolName}'`) - 200),
         serverSource.indexOf(`name: '${toolName}'`),
       );
-      expect(toolSection).not.toContain('if (false) mcp.addTool');
+      expect(toolSection).toContain('registerTool(');
+      
+      // Verify it IS in the publicTools Set
+      const publicToolsSection = serverSource.substring(
+        serverSource.indexOf('const publicTools = new Set(['),
+        serverSource.indexOf('const publicTools = new Set([') + 300,
+      );
+      expect(publicToolsSection).toContain(`'${toolName}'`);
     });
 
-    // Verify internal tools ARE wrapped in if(false)
+    // Verify internal tools are registered with registerTool (not in publicTools Set)
     const internalTools = [
       'squad_dispatch',
       'squad_send',
@@ -178,7 +185,7 @@ describe('MCP Tool Visibility', () => {
       expect(matches).toBeTruthy();
       expect(matches!.length).toBeGreaterThanOrEqual(1);
       
-      // Verify it IS preceded by "if (false)"
+      // Verify it IS preceded by registerTool
       const sectionStart = serverSource.indexOf(`name: '${toolName}'`);
       const toolSection = serverSource.substring(
         Math.max(0, sectionStart - 500),
@@ -188,8 +195,16 @@ describe('MCP Tool Visibility', () => {
       // Should have [INTERNAL - Not exposed on MCP] marker
       expect(toolSection).toContain('[INTERNAL - Not exposed on MCP]');
       
-      // Should have if (false) wrapper
-      expect(toolSection).toContain('if (false) mcp.addTool');
+      // Should use registerTool (which checks publicTools Set)
+      expect(toolSection).toContain('registerTool(');
+      
+      // Should NOT be in the publicTools Set
+      expect(serverSource).toContain('const publicTools = new Set([');
+      const publicToolsSection = serverSource.substring(
+        serverSource.indexOf('const publicTools = new Set(['),
+        serverSource.indexOf('const publicTools = new Set([') + 300,
+      );
+      expect(publicToolsSection).not.toContain(`'${toolName}'`);
     });
   });
 

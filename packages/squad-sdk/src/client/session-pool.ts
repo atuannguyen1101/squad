@@ -101,10 +101,11 @@ export class SessionPool {
     return this.sessions.get(sessionId);
   }
 
-  /** Find a session by agent name */
+  /** Find a session by agent name (case-insensitive) */
   findByAgent(agentName: string): SquadSession | undefined {
+    const lowerAgentName = agentName.toLowerCase();
     for (const session of this.sessions.values()) {
-      if (session.agentName === agentName) return session;
+      if (session.agentName.toLowerCase() === lowerAgentName) return session;
     }
     return undefined;
   }

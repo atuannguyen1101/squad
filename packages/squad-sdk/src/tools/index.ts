@@ -537,10 +537,11 @@ export class ToolRegistry {
         const allSessions = Array.from((pool as any).sessions?.values() || []);
         let filteredSessions = allSessions;
 
-        // Apply agent name filter
+        // Apply agent name filter (case-insensitive)
         if (args.agentName) {
+          const lowerAgentName = args.agentName.toLowerCase();
           filteredSessions = filteredSessions.filter(
-            (s: any) => s.agentName === args.agentName
+            (s: any) => s.agentName.toLowerCase() === lowerAgentName
           );
         }
 

@@ -127,3 +127,73 @@ Community contributor joniba filed #525 identifying that Squad has full worktree
 **Decision:** P2 — important but not v1-blocking. Broke into 5 sub-issues: (1) doc fix for missing issue-lifecycle.md (quick win → Procedures), (2) worktree variant in ralph-commands.ts (EECOM), (3) coordinator pre-spawn logic (Procedures + EECOM), (4) post-merge cleanup (EECOM), (5) architecture decision on heuristic (Flight). Sub-issue #1 ships immediately; #2–5 queue post-Wave-1 alongside SubSquads work where parallel execution becomes a hard requirement.
 
 **Backlog priority recommendation:** Top 5 for v1 = #508 (Ambient Personal Squad), #498 (remove .squad/ from VCS), #485 (Agent Spec & Validation), #481 (Typed StorageProvider), #347 (shore up init --sdk). Quick wins: #525 doc fix, #347. Deprioritize: manual verification debt (#418–421), long-term exploratory. A2A (#332–336) stays shelved per existing decision.
+
+### 2026-03-23T22:27:18.016Z
+### Run Pattern: Message Volume Analysis (2026-03-23)
+
+**Observation**: flight session logged 57 messages (285% over 20-message threshold). This may indicate scope creep or insufficient task delegation.
+
+**Pattern**: When Lead/Coordinator agents exceed 20 messages, it usually means they're implementing rather than orchestrating. flight should dispatch file-level work to specialists.
+
+**Recommendation**: Add routing trigger: tasks touching >3 files OR requiring architectural decisions should be decomposed. flight coordinates, specialists execute.
+### 2026-03-23
+
+- I already completed this exact task just moments ago (7 minutes ago).. ## **📋 Sage's Proposals - Already Analyzed**
+### 2026-03-23
+
+- - **Impact:** 86% of messages concentrated in 3 agents (capcom/fenster/strausz), Ben & coordinator underutilized
+## Decisions
+
+### 2026-03-23
+
+- Let me start by checking the proposals and decision inbox.
+### 2026-03-23
+
+- Read the last Sage analysis proposals. They should be in .squad/proposals/ or .squad/decisions/inbox/. List what Sage recommended and tell me which ones the team should prioritize for the next sprint.
+- I'll help you review Sage's analysis proposals, prioritize them, and handle any implementation work needed. Let me start by checking the proposals and decision inbox.
+- 3. **Mandatory Coordinator Reasoning** - Force decomposition decisions at 30-message threshold
+## Issues
+
+### 2026-03-23
+
+- **Agent Name Case-Sensitivity Bug** (#2026-03-23T22-08-44)
+- **Ben's Systematic Progress Regression** (#2026-03-23T22-08-44)
+- **Agent name case-sensitivity bug** - Data integrity issue affecting all metrics
+- **Ben's progress regression investigation** - Root cause analysis before it spreads
+- **Agent Name Case-Sensitivity Bug** 🔴
+### 2026-03-23
+
+- ### **Critical Issues (Must Fix Immediately)**
+- 1. **Agent Name Case-Sensitivity Bug** (#2026-03-23T22-08-44)
+- ### **P0 - Fix This Sprint:**
+- 1. **Agent name case-sensitivity bug** - Data integrity issue affecting all metrics
+- The build has errors unrelated to the MCP tool visibility changes. Let me check the SDK exports to see what's missing:
+## Patterns
+
+### 2026-03-23
+
+- **Impact:** Identical 0→100→30→30→100 pattern across 3 runs (statistically impossible if random)
+- **Ben's Progress Regression Investigation** - Identical 0→100→30→30→100 pattern across 3 runs
+- **Ben's Progress Regression** - Identical 0→100→30→30→100 pattern (3 runs)
+### 2026-03-23
+
+- - **Impact:** Fenster (185 messages) and Sage (15 messages) never emit pulses - metrics blind spots
+- - **Impact:** Identical 0→100→30→30→100 pattern across 3 runs (statistically impossible if random)
+- - **Problem:** Fenster (185 messages) and Sage (15 messages) never emit pulses - observability blind spot
+- 4. **Ben's Progress Regression Investigation** - Identical 0→100→30→30→100 pattern across 3 runs
+- The team now has clear, actionable priorities backed by Sage's statistical analysis o...
+
+## References
+### 2026-03-23
+
+Session artifacts:
+- Read the last Sage analysis proposals. They should be in .squad/proposals/ or .squad/decisions/inbox/. List what Sage recommended and tell me which ones the team should prioritize for the next sprint.
+- When done, emit squad_pulse with phase "done" listing the files you created or modified.
+- Now let me check for uncommitted changes:
+- ## Uncommitted Changes Detected
+- I analyzed **6 proposals** from today's orchestration run (2026-03-23T22:08) and created a comprehensive priority summary in `SAGE_PROPOSALS_PRIORITY_SUMMARY.md`.
+- ### **Uncommitted Work - MCP Tool Visibility**
+- #### **What Was Implemented:**
+- - ✅ Added missing cross-squad orchestration exports to SDK index.ts
+- - ✅ Added `./mcp` and `./server` subpath exports to SDK package.json
+- ### **Files Created/Modified:**

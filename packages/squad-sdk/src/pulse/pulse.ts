@@ -82,12 +82,88 @@ export class PulseCollector {
   private userQueue: Pulse[] = [];
   private onUserRelevantPulse?: (pulse: Pulse) => void;
   private pulseListeners: Array<(pulse: Pulse) => void> = [];
+  private progressWarningListener?: (agent: string, oldProgress: number, newProgress: number) => void;
+  private messageCountWarningThreshold: number = 25;
+  private messageCountsByAgent: Map<string, number> = new Map();
+  private messageCountWarningsEmitted: Set<string> = new Set();
 
   setOnUserRelevantPulse(callback: (pulse: Pulse) => void): void {
     this.onUserRelevantPulse = callback;
   }
 
+  /**
+   * Set callback for progress regression warnings.
+   * Called when an agent's progress goes backward (e.g., 100 → 30).
+   */
+  setOnProgressRegression(callback: (agent: string, oldProgress: number, newProgress: number) => void): void {
+    this.progressWarningListener = callback;
+  }
+
+  /**
+   * Track a message for an agent and check if threshold is exceeded.
+   */
+  trackMessage(agentName: string): void {
+    const currentCount = this.messageCountsByAgent.get(agentName) || 0;
+    const newCount = currentCount + 1;
+    this.messageCountsByAgent.set(agentName, newCount);
+
+    // Emit warning if threshold exceeded and not already warned
+    if (newCount >= this.messageCountWarningThreshold && 
+        !this.messageCountWarningsEmitted.has(agentName)) {
+      this.messageCountWarningsEmitted.add(agentName);
+      const warningPulse: Pulse = {
+        agent: 'System',
+        phase: 'reviewing',
+        status: 'warning',
+        progressPct: 0,
+        summary: `Message count threshold exceeded: ${agentName} has ${newCount} messages (threshold: ${this.messageCountWarningThreshold}). Consider task decomposition.`,
+        blockers: [],
+        questionsForUser: [],
+        artifacts: [],
+        nextStep: 'Review task complexity',
+        timestamp: new Date().toISOString(),
+      };
+      this.pulses.push(warningPulse);
+      const filter = filterPulseForUser(warningPulse);
+      if (filter.userRelevant) {
+        this.userQueue.push(warningPulse);
+        this.onUserRelevantPulse?.(warningPulse);
+      }
+    }
+  }
+
   record(pulse: Pulse): PulseFilter {
+    // Check for progress regression before recording
+    const previousPulses = this.pulses.filter(p => p.agent === pulse.agent);
+    if (previousPulses.length > 0) {
+      const lastPulse = previousPulses[previousPulses.length - 1];
+      // Detect backward progress (regression threshold: >10% backward movement)
+      if (lastPulse && lastPulse.progressPct > pulse.progressPct && 
+          lastPulse.progressPct - pulse.progressPct > 10) {
+        this.progressWarningListener?.(pulse.agent, lastPulse.progressPct, pulse.progressPct);
+        // Optionally emit a warning pulse
+        const warningPulse: Pulse = {
+          agent: 'System',
+          phase: 'reviewing',
+          status: 'warning',
+          progressPct: 0,
+          summary: `Progress regression detected: ${pulse.agent} went from ${lastPulse.progressPct}% to ${pulse.progressPct}%`,
+          blockers: [],
+          questionsForUser: [],
+          artifacts: [],
+          nextStep: 'Review agent progress',
+          timestamp: new Date().toISOString(),
+        };
+        // Record the warning pulse
+        this.pulses.push(warningPulse);
+        const warningFilter = filterPulseForUser(warningPulse);
+        if (warningFilter.userRelevant) {
+          this.userQueue.push(warningPulse);
+          this.onUserRelevantPulse?.(warningPulse);
+        }
+      }
+    }
+
     this.pulses.push(pulse);
     const filter = filterPulseForUser(pulse);
     if (filter.userRelevant) {
@@ -120,34 +196,78 @@ export class PulseCollector {
    *
    * Also resolves early if the agent emits an 'error' status or 'blocked' phase,
    * since those indicate the agent won't reach 'done'.
+   *
+   * Auto-pulse safety net: If no pulse is received within autoPulseThresholdMs,
+   * generates a "still working" pulse to prevent hanging.
    */
   waitForDonePulse(
     agentName: string,
     timeoutMs: number,
     targetPhase: PulsePhase = 'done',
+    autoPulseThresholdMs: number = 60000, // Default: 60 seconds
   ): Promise<Pulse | null> {
-    // Check if we already have a matching pulse
+    // Check if we already have a matching pulse (case-insensitive)
+    const lowerAgentName = agentName.toLowerCase();
     const existing = this.pulses.find(
-      p => p.agent === agentName && (p.phase === targetPhase || p.status === 'error' || p.phase === 'blocked'),
+      p => p.agent.toLowerCase() === lowerAgentName && (p.phase === targetPhase || p.status === 'error' || p.phase === 'blocked'),
     );
     if (existing) return Promise.resolve(existing);
 
     return new Promise<Pulse | null>((resolve) => {
       let settled = false;
+      let autoPulseTimer: NodeJS.Timeout | null = null;
+      let lastPulseTime = Date.now();
+
+      // Auto-pulse safety net: generate "still working" pulse if silent too long
+      const startAutoPulseTimer = () => {
+        if (autoPulseTimer) clearTimeout(autoPulseTimer);
+        autoPulseTimer = setTimeout(() => {
+          if (settled) return;
+          const timeSinceLastPulse = Date.now() - lastPulseTime;
+          if (timeSinceLastPulse >= autoPulseThresholdMs) {
+            // Generate an auto-pulse
+            const autoPulse: Pulse = {
+              agent: agentName,
+              phase: 'implementing',
+              status: 'ok',
+              progressPct: 0,
+              summary: 'Still working (auto-generated pulse)',
+              blockers: [],
+              questionsForUser: [],
+              artifacts: [],
+              nextStep: 'Continuing work',
+              timestamp: new Date().toISOString(),
+            };
+            this.record(autoPulse);
+            lastPulseTime = Date.now();
+            // Restart the timer
+            startAutoPulseTimer();
+          }
+        }, autoPulseThresholdMs);
+      };
+
+      startAutoPulseTimer();
 
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
+        if (autoPulseTimer) clearTimeout(autoPulseTimer);
         unsub();
         resolve(null);
       }, timeoutMs);
 
       const unsub = this.onPulse((pulse) => {
         if (settled) return;
-        if (pulse.agent !== agentName) return;
+        // Case-insensitive agent name comparison
+        if (pulse.agent.toLowerCase() !== lowerAgentName) return;
+        
+        // Update last pulse time
+        lastPulseTime = Date.now();
+        
         if (pulse.phase === targetPhase || pulse.status === 'error' || pulse.phase === 'blocked') {
           settled = true;
           clearTimeout(timer);
+          if (autoPulseTimer) clearTimeout(autoPulseTimer);
           unsub();
           resolve(pulse);
         }
@@ -166,7 +286,8 @@ export class PulseCollector {
   }
 
   getByAgent(agent: string): Pulse[] {
-    return this.pulses.filter(p => p.agent === agent);
+    const lowerAgent = agent.toLowerCase();
+    return this.pulses.filter(p => p.agent.toLowerCase() === lowerAgent);
   }
 
   getLatestByAgent(): Map<string, Pulse> {
