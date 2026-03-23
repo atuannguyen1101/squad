@@ -185,6 +185,18 @@
     "./config/models": {
       "types": "./dist/config/models.d.ts",
       "import": "./dist/config/models.js"
+    },
+    "./mcp/proposal-pipeline": {
+      "types": "./dist/mcp/proposal-pipeline.d.ts",
+      "import": "./dist/mcp/proposal-pipeline.js"
+    },
+    "./server/ceremony-runner": {
+      "types": "./dist/server/ceremony-runner.d.ts",
+      "import": "./dist/server/ceremony-runner.js"
+    },
+    "./server/ceremonies/retrospective": {
+      "types": "./dist/server/ceremonies/retrospective.d.ts",
+      "import": "./dist/server/ceremonies/retrospective.js"
     }
   },
   "files": [

@@ -3,11 +3,12 @@
  *
  * Defines Squad's custom tools registered with the SDK via defineTool().
  * Tools provide agents with typed, validated orchestration primitives:
- *   - squad_route:  Route work to another agent via session pool
- *   - squad_decide: Write a typed decision to the inbox drop-box
- *   - squad_memory: Append to agent history (learnings, updates)
- *   - squad_status: Query session pool state
- *   - squad_skill:  Read/write agent skills
+ *   - squad_route:     Route work to another agent via session pool
+ *   - squad_decide:    Write a typed decision to the inbox drop-box
+ *   - squad_memory:    Append to agent history (learnings, updates)
+ *   - squad_status:    Query session pool state
+ *   - squad_skill:     Read/write agent skills
+ *   - squad_proposals: Manage improvement proposals (create, list, update, apply)
  */
 
 import * as fs from 'node:fs';
@@ -15,6 +16,19 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { SquadTool, SquadToolResult } from '../adapter/types.js';
 import { trace, SpanStatusCode } from '../runtime/otel-api.js';
+import {
+  classifyProposalRisk,
+  generateProposalId,
+  formatProposalMarkdown,
+  createProposalRecord,
+  autoApplyProposal,
+  saveAppliedRecord,
+  recordApplicationForTracking,
+  type ImprovementProposal as PipelineProposal,
+  type ProposalCategory as PipelineCategory,
+  type ProposalPriority as PipelinePriority,
+  type ProposalStatus,
+} from '../mcp/proposal-pipeline.js';
 
 const tracer = trace.getTracer('squad-sdk');
 
@@ -96,6 +110,28 @@ export interface SkillRequest {
   content?: string;
   /** Confidence level (required for write) */
   confidence?: 'low' | 'medium' | 'high';
+}
+
+export interface ProposalRequest {
+  /** Operation to perform on proposals */
+  operation: 'create' | 'list' | 'update' | 'apply';
+  /** Proposal data (required for create) */
+  proposal?: {
+    title: string;
+    category: string;
+    targetFile: string;
+    description: string;
+    evidence: string;
+    priority: string;
+  };
+  /** Status filter for list operation (default: 'pending') */
+  statusFilter?: 'pending' | 'approved' | 'rejected' | 'applied';
+  /** Proposal filename for update/apply operations */
+  proposalFile?: string;
+  /** New status for update operation */
+  newStatus?: 'approved' | 'rejected';
+  /** Review comment for update operation */
+  reviewComment?: string;
 }
 
 // --- Tool Definition Helper ---
@@ -584,12 +620,197 @@ export class ToolRegistry {
       },
     });
 
+    // squad_proposals: Manage improvement proposals
+    const squadProposals = defineTool<ProposalRequest>({
+      name: 'squad_proposals',
+      description: 'Manage improvement proposals. Create proposals from analysis, list pending proposals, update (approve/reject), or apply proposals. Proposals are stored as markdown files in .squad/proposals/.',
+      parameters: {
+        type: 'object',
+        properties: {
+          operation: {
+            type: 'string',
+            enum: ['create', 'list', 'update', 'apply'],
+            description: 'Operation to perform',
+          },
+          proposal: {
+            type: 'object',
+            description: 'Proposal data (required for create operation)',
+            properties: {
+              title: { type: 'string', description: 'Proposal title' },
+              category: { type: 'string', enum: ['charter', 'routing', 'sdk-config', 'skill', 'workflow'] },
+              targetFile: { type: 'string', description: 'Target file this proposal affects' },
+              description: { type: 'string', description: 'Detailed description' },
+              evidence: { type: 'string', description: 'Evidence or rationale' },
+              priority: { type: 'string', enum: ['low', 'medium', 'high'] },
+            },
+            required: ['title', 'category', 'targetFile', 'description', 'evidence', 'priority'],
+          },
+          statusFilter: { type: 'string', enum: ['pending', 'approved', 'rejected', 'applied'] },
+          proposalFile: { type: 'string', description: 'Proposal filename for update/apply' },
+          newStatus: { type: 'string', enum: ['approved', 'rejected'] },
+          reviewComment: { type: 'string', description: 'Reviewer comment' },
+        },
+        required: ['operation'],
+      },
+      handler: async (args) => {
+        try {
+          const proposalDir = path.join(this.squadRoot, 'proposals');
+
+          switch (args.operation) {
+            case 'create': {
+              if (!args.proposal) {
+                return { textResultForLlm: 'Error: proposal data is required for create operation', resultType: 'failure', error: 'Missing proposal' };
+              }
+              const p = args.proposal;
+              const validCategories = ['charter', 'routing', 'sdk-config', 'skill', 'workflow'];
+              const validPriorities = ['low', 'medium', 'high'];
+              if (!validCategories.includes(p.category)) {
+                return { textResultForLlm: `Error: Invalid category "${p.category}"`, resultType: 'failure', error: 'Invalid category' };
+              }
+              if (!validPriorities.includes(p.priority)) {
+                return { textResultForLlm: `Error: Invalid priority "${p.priority}"`, resultType: 'failure', error: 'Invalid priority' };
+              }
+
+              const proposal: PipelineProposal = {
+                category: p.category as PipelineCategory,
+                targetFile: p.targetFile,
+                title: p.title,
+                description: p.description,
+                expectedImpact: p.description,
+                priority: p.priority as PipelinePriority,
+                evidence: [p.evidence],
+              };
+              const classified = classifyProposalRisk(proposal);
+              const record = createProposalRecord(classified);
+              fs.mkdirSync(proposalDir, { recursive: true });
+              const filename = `${record.id}.md`;
+              fs.writeFileSync(path.join(proposalDir, filename), formatProposalMarkdown(record), 'utf-8');
+              return {
+                textResultForLlm: `Proposal created: ${filename}\nRisk level: ${classified.riskLevel} — ${classified.riskReason}`,
+                resultType: 'success',
+                toolTelemetry: { proposalId: record.id, riskLevel: classified.riskLevel, filename },
+              };
+            }
+
+            case 'list': {
+              const statusFilter = args.statusFilter ?? 'pending';
+              fs.mkdirSync(proposalDir, { recursive: true });
+              const appliedDir = path.join(proposalDir, 'applied');
+              let files: string[] = [];
+              try {
+                files = statusFilter === 'applied'
+                  ? fs.readdirSync(appliedDir).filter(f => f.endsWith('.md'))
+                  : fs.readdirSync(proposalDir).filter(f => f.endsWith('.md'));
+              } catch { /* dir may not exist */ }
+
+              const matching: string[] = [];
+              const dir = statusFilter === 'applied' ? appliedDir : proposalDir;
+              for (const file of files) {
+                try {
+                  const content = fs.readFileSync(path.join(dir, file), 'utf-8');
+                  const statusMatch = content.match(/\*\*Status:\*\*\s*(\w+)/);
+                  if ((statusMatch?.[1]?.toLowerCase() ?? 'pending') === statusFilter) {
+                    const titleMatch = content.match(/^#\s+(.+)$/m);
+                    matching.push(`- ${file}: ${titleMatch?.[1] ?? file}`);
+                  }
+                } catch { /* skip */ }
+              }
+              return {
+                textResultForLlm: matching.length > 0
+                  ? `Found ${matching.length} ${statusFilter} proposal(s):\n${matching.join('\n')}`
+                  : `No ${statusFilter} proposals found.`,
+                resultType: 'success',
+                toolTelemetry: { statusFilter, count: matching.length },
+              };
+            }
+
+            case 'update': {
+              if (!args.proposalFile) {
+                return { textResultForLlm: 'Error: proposalFile is required', resultType: 'failure', error: 'Missing proposalFile' };
+              }
+              if (!args.newStatus || !['approved', 'rejected'].includes(args.newStatus)) {
+                return { textResultForLlm: 'Error: newStatus must be "approved" or "rejected"', resultType: 'failure', error: 'Invalid newStatus' };
+              }
+              const filePath = path.join(proposalDir, args.proposalFile);
+              if (!fs.existsSync(filePath)) {
+                return { textResultForLlm: `Error: Proposal file not found: ${args.proposalFile}`, resultType: 'failure', error: 'File not found' };
+              }
+              let content = fs.readFileSync(filePath, 'utf-8');
+              content = content.replace(/\*\*Status:\*\*\s*\w+/, `**Status:** ${args.newStatus}`);
+              if (args.reviewComment) {
+                content += `\n## Review\n\n${args.reviewComment}\n`;
+              }
+              fs.writeFileSync(filePath, content, 'utf-8');
+              return {
+                textResultForLlm: `Proposal ${args.proposalFile} updated to "${args.newStatus}"`,
+                resultType: 'success',
+                toolTelemetry: { proposalFile: args.proposalFile, newStatus: args.newStatus },
+              };
+            }
+
+            case 'apply': {
+              if (!args.proposalFile) {
+                return { textResultForLlm: 'Error: proposalFile is required', resultType: 'failure', error: 'Missing proposalFile' };
+              }
+              const filePath = path.join(proposalDir, args.proposalFile);
+              if (!fs.existsSync(filePath)) {
+                return { textResultForLlm: `Error: Proposal file not found: ${args.proposalFile}`, resultType: 'failure', error: 'File not found' };
+              }
+              const content = fs.readFileSync(filePath, 'utf-8');
+              const titleMatch = content.match(/^#\s+(.+)$/m);
+              const categoryMatch = content.match(/\*\*Category:\*\*\s*(\w[\w-]*)/);
+              const priorityMatch = content.match(/\*\*Priority:\*\*\s*(\w+)/);
+              const targetMatch = content.match(/\*\*Target:\*\*\s*(.+)$/m);
+              const descMatch = content.match(/## Description\s*\n\s*\n([\s\S]*?)(?=\n## )/);
+
+              const proposal: PipelineProposal = {
+                title: titleMatch?.[1] ?? 'Unknown',
+                category: (categoryMatch?.[1] ?? 'charter') as PipelineCategory,
+                priority: (priorityMatch?.[1] ?? 'medium') as PipelinePriority,
+                targetFile: targetMatch?.[1]?.trim() ?? '',
+                description: descMatch?.[1]?.trim() ?? '',
+                expectedImpact: '',
+                evidence: [],
+              };
+              const classified = classifyProposalRisk(proposal);
+              const record = createProposalRecord(classified, args.proposalFile.replace('.md', ''));
+              const repoRoot = path.dirname(this.squadRoot);
+              const applyResult = autoApplyProposal(record, repoRoot);
+              if (applyResult.applied) {
+                saveAppliedRecord(record, applyResult, repoRoot);
+                recordApplicationForTracking(repoRoot, record);
+                const updatedContent = content.replace(/\*\*Status:\*\*\s*\w+/, '**Status:** applied');
+                fs.writeFileSync(filePath, updatedContent, 'utf-8');
+              }
+              return {
+                textResultForLlm: applyResult.applied
+                  ? `Proposal "${proposal.title}" applied to ${proposal.targetFile}`
+                  : `Not applied: ${applyResult.reason}`,
+                resultType: applyResult.applied ? 'success' : 'failure',
+                toolTelemetry: { proposalFile: args.proposalFile, applied: applyResult.applied },
+              };
+            }
+
+            default:
+              return { textResultForLlm: `Unknown operation: ${args.operation}`, resultType: 'failure', error: 'Unknown operation' };
+          }
+        } catch (error) {
+          return {
+            textResultForLlm: `Failed to ${args.operation} proposal: ${sanitizeErrorForLlm(error, this.squadRoot)}`,
+            resultType: 'failure',
+            error: String(error),
+          };
+        }
+      },
+    });
+
     // Register all tools
     this.tools.set('squad_route', squadRoute);
     this.tools.set('squad_decide', squadDecide);
     this.tools.set('squad_memory', squadMemory);
     this.tools.set('squad_status', squadStatus);
     this.tools.set('squad_skill', squadSkill);
+    this.tools.set('squad_proposals', squadProposals);
   }
 
   /** Get all registered tools for session config */

@@ -65,10 +65,16 @@ export interface HooksConfig {
 
 export interface CeremonyConfig {
   name: string;
+  /** Ceremony type — determines the runner behavior. Defaults to 'custom'. */
+  type?: 'retrospective' | 'custom';
+  /** Trigger condition: 'all-sessions-closed' | 'pipeline-idle' | 'manual'. */
+  trigger?: string;
   schedule?: string;
   participants?: string[];
   agenda?: string;
   enabled?: boolean;
+  /** Idle timeout in milliseconds (for pipeline-idle trigger). */
+  idleTimeoutMs?: number;
 }
 
 export interface PluginConfig {

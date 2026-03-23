@@ -7,6 +7,7 @@
  * - squad_memory: Appending to agent history
  * - squad_status: Querying session state
  * - squad_skill: Reading/writing skills
+ * - squad_proposals: Managing improvement proposals
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -78,9 +79,9 @@ describe('ToolRegistry', () => {
   });
 
   describe('registration', () => {
-    it('should register all five squad tools', () => {
+    it('should register all six squad tools', () => {
       const tools = registry.getTools();
-      expect(tools.length).toBe(5);
+      expect(tools.length).toBe(6);
 
       const toolNames = tools.map(t => t.name);
       expect(toolNames).toContain('squad_route');
@@ -88,6 +89,7 @@ describe('ToolRegistry', () => {
       expect(toolNames).toContain('squad_memory');
       expect(toolNames).toContain('squad_status');
       expect(toolNames).toContain('squad_skill');
+      expect(toolNames).toContain('squad_proposals');
     });
 
     it('should register tools with descriptions and parameters', () => {
@@ -103,7 +105,7 @@ describe('ToolRegistry', () => {
     it('should return all registered tools', () => {
       const tools = registry.getTools();
       expect(Array.isArray(tools)).toBe(true);
-      expect(tools.length).toBe(5);
+      expect(tools.length).toBe(6);
     });
 
     it('should return tools with handler functions', () => {
@@ -117,7 +119,7 @@ describe('ToolRegistry', () => {
   describe('getToolsForAgent', () => {
     it('should return all tools when no filter provided', () => {
       const tools = registry.getToolsForAgent();
-      expect(tools.length).toBe(5);
+      expect(tools.length).toBe(6);
     });
 
     it('should filter tools by allowed list', () => {

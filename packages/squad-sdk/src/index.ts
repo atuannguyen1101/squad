@@ -101,3 +101,60 @@ export type {
 // Base Roles (built-in role catalog)
 export * from './roles/index.js';
 export * from './platform/index.js';
+
+// Proposal Pipeline (self-improvement system)
+export {
+  classifyProposalRisk,
+  classifyProposals,
+  classifyPathSensitivity,
+  generateProposalId,
+  createProposalRecord,
+  formatProposalMarkdown,
+  autoApplyProposal,
+  saveAppliedRecord,
+  formatProposalsForUser,
+  loadEffectivenessLog,
+  saveEffectivenessLog,
+  recordApplicationForTracking,
+  checkEffectiveness,
+  runProposalPipeline,
+} from './mcp/proposal-pipeline.js';
+export type {
+  ProposalCategory,
+  ProposalPriority,
+  ProposalRiskLevel,
+  ImprovementProposal,
+  ClassifiedProposal,
+  ProposalStatus,
+  ProposalRecord,
+  AutoApplyResult,
+  EffectivenessRecord,
+  EffectivenessLog,
+  PipelineResult,
+} from './mcp/proposal-pipeline.js';
+
+// Ceremony Runner (ceremony execution engine)
+export {
+  CeremonyRunner,
+  buildRetrospectivePrompt,
+  buildCeremonyContext,
+  formatCeremonyReport,
+  saveCeremonyReport,
+  triggerCeremonyManually,
+} from './server/ceremony-runner.js';
+export type {
+  CeremonyType,
+  CeremonyConfigExtended,
+  CeremonyPulse,
+  AppliedProposalSummary,
+  CeremonyContext,
+  CeremonyResult,
+  CeremonyDispatchFn,
+} from './server/ceremony-runner.js';
+
+// Built-in ceremony types
+export {
+  createDefaultRetrospective,
+  createIdleRetrospective,
+  validateCeremonyConfig,
+} from './server/ceremonies/retrospective.js';
