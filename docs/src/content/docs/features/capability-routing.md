@@ -24,19 +24,16 @@ Squad discovers what each machine can do and routes issues only to machines that
 
 ## What Are Capabilities?
 
-A capability is a label that describes what a machine can do — hardware, OS, or environment attributes that not every runner has. You declare capabilities in `.squad/config.json`; Squad reads them when routing issues.
+A capability is a label that describes what a machine can do — hardware, OS, or environment attributes that not every runner has. You declare capabilities in `machine-capabilities.json` at the project root or home directory; Squad reads them when routing issues.
 
 Examples: `gpu`, `windows`, `macos`, `arm64`, `high-memory`, `docker`.
 
 ## Declaring Capabilities
 
-Add a `capabilities` array to `.squad/config.json` on each machine:
+Add a `capabilities` array to `machine-capabilities.json` at the project root or home directory on each machine:
 
 ```json
-{
-  "version": 1,
-  "capabilities": ["gpu", "cuda", "high-memory"]
-}
+["gpu", "cuda", "high-memory"]
 ```
 
 Squad reads this file at startup. The declared capabilities are available to the routing system immediately.
@@ -77,4 +74,3 @@ Machine B  capabilities: ["macos"]                   ← skips it
 
 - [Work Routing](routing.md) — pattern-based and skill-aware routing
 - [Ralph — Work Monitor](ralph.md) — how Ralph polls and claims issues
-- [Cross-Machine Coordination](cross-machine.md) — multi-machine Squad deployments
