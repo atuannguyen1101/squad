@@ -51,6 +51,7 @@ const EXPECTED_SCENARIOS = [
 
 const EXPECTED_FEATURES = [
   'ceremonies',
+  'capability-routing',
   'consult-mode',
   'copilot-coding-agent',
   'directives',
@@ -60,6 +61,7 @@ const EXPECTED_FEATURES = [
   'gitlab-issues',
   'human-team-members',
   'issue-templates',
+  'keda-scaling',
   'labels',
   'marketplace',
   'mcp',
@@ -71,6 +73,7 @@ const EXPECTED_FEATURES = [
   'prd-mode',
   'project-boards',
   'ralph',
+  'rate-limiting',
   'remote-control',
   'response-modes',
   'reviewer-protocol',

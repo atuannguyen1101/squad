@@ -71,6 +71,9 @@ export const NAV_SECTIONS: NavSection[] = [
       { title: 'Squad RC', slug: 'features/squad-rc' },
       { title: 'Streams', slug: 'features/streams' },
       { title: 'Distributed Mesh', slug: 'features/distributed-mesh' },
+      { title: 'Capability Routing', slug: 'features/capability-routing' },
+      { title: 'Rate Limiting', slug: 'features/rate-limiting' },
+      { title: 'KEDA Autoscaling', slug: 'features/keda-scaling' },
     ],
   },
   {
