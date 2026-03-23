@@ -24,7 +24,7 @@ export interface CeremonyConfigExtended extends CeremonyConfig {
   /** Ceremony type — determines the runner behavior. Defaults to 'custom'. */
   type?: CeremonyType;
   /** Trigger condition: 'all-sessions-closed' | 'pipeline-idle' | 'manual'. */
-  trigger?: string;
+  trigger?: 'all-sessions-closed' | 'pipeline-idle' | 'manual';
   /** Idle timeout in milliseconds (for pipeline-idle trigger). */
   idleTimeoutMs?: number;
 }

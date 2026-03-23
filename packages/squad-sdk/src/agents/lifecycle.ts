@@ -198,6 +198,7 @@ export class AgentLifecycleManager {
         systemMessage: {
           content: agentConfig.prompt,
         },
+        onPermissionRequest: () => ({ kind: 'approved' as const }),
       };
       
       const session = await this.client.createSession(sessionConfig);

@@ -80,7 +80,7 @@ export function validateCeremonyConfig(config: CeremonyConfigExtended): string[]
     errors.push(`Invalid ceremony type: "${config.type}" (expected "retrospective" or "custom")`);
   }
 
-  if (config.trigger === 'schedule') {
+  if ((config.trigger as string) === 'schedule') {
     errors.push('Scheduled triggers (cron) are not supported — use "all-sessions-closed", "pipeline-idle", or "manual"');
   }
 
