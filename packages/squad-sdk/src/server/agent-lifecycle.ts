@@ -16,18 +16,7 @@ import type { SquadClientWithPool } from '../client/index.js';
 import type { SquadSession, SquadSessionConfig, SquadTool, SquadMCPServerConfig } from '../adapter/types.js';
 import type { EventBus } from '../runtime/event-bus.js';
 import { CharterCompiler, type AgentCharter } from '../agents/index.js';
-import { getBuiltInActor } from '../agents/built-in-actors.js';
-import { extractSessionLearnings } from '../agents/session-learnings.js';
-import { appendToHistory, createHistoryShadow, readHistory } from '../agents/history-shadow.js';
 import type { ServerPersistence, SessionRegistryEntry, ServerStateSnapshot } from './persistence.js';
-import { CeremonyTriggerEngine } from './ceremony-triggers.js';
-import type { CeremonyConfig } from '../config/schema.js';
-import {
-  applyContextWindow,
-  createContextWindowState,
-  type ContextWindowConfig,
-  type ContextWindowState,
-} from '../context/index.js';
 
 // ============================================================================
 // Types
@@ -46,18 +35,8 @@ export interface AgentSessionManagerConfig {
   defaultModel?: string;
   /** Working directory for agent sessions */
   workingDirectory?: string;
-  /** MCP servers to attach to agent sessions. If not provided, loaded from ~/.copilot/mcp-config.json */
+  /** MCP servers to attach to every agent session. If not provided, loaded from ~/.copilot/mcp-config.json */
   mcpServers?: Record<string, SquadMCPServerConfig>;
-  /** Ceremony configurations for auto-dispatch after pipeline completion */
-  ceremonies?: CeremonyConfig[];
-  /** Context windowing configuration. If provided, auto-summarization is enabled. */
-  contextWindowConfig?: Partial<ContextWindowConfig>;
-}
-
-export interface SessionMessage {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  timestamp: string;
 }
 
 export interface AgentSessionEntry {
@@ -71,10 +50,6 @@ export interface AgentSessionEntry {
   createdAt: Date;
   /** Timestamp of the last dispatched message */
   lastActiveAt: Date;
-  /** Captured conversation messages */
-  messages: SessionMessage[];
-  /** Context windowing state — tracks summarization progress */
-  contextWindowState: ContextWindowState;
 }
 
 export interface DispatchResult {
@@ -92,36 +67,10 @@ export interface ActiveSessionInfo {
   createdAt: Date;
   lastActiveAt: Date;
   charterRole: string;
-  messageCount: number;
 }
 
 // Maximum bytes of history to include in the compiled charter prompt
 const MAX_HISTORY_BYTES = 2048;
-
-/**
- * Placeholder message recorded when an agent completes its turn via tool calls
- * (file edits, commands) but returns no text response. Exported so gates can
- * distinguish it from real agent output.
- */
-export const TOOL_CALL_PLACEHOLDER = '[Agent completed turn — work performed via tool calls]';
-
-/**
- * Extract text content from a sendAndWait response.
- * Returns null when the response is empty, undefined, or contains no text —
- * which typically means the agent did work via tool calls only.
- */
-export function extractResponseContent(result: unknown): string | null {
-  if (result == null) return null;
-  if (typeof result === 'string') return result.length > 0 ? result : null;
-  const r = result as Record<string, unknown>;
-  if (typeof r.text === 'string' && (r.text as string).length > 0) return r.text as string;
-  if (r.data && typeof (r.data as Record<string, unknown>).content === 'string') {
-    const c = String((r.data as Record<string, unknown>).content);
-    return c.length > 0 ? c : null;
-  }
-  if (typeof r.content === 'string' && (r.content as string).length > 0) return r.content as string;
-  return null;
-}
 
 /**
  * Resolve a potentially abbreviated agent name to the full directory name
@@ -140,14 +89,19 @@ function resolveAgentName(squadRoot: string, input: string): string {
   }
 
   const lower = input.toLowerCase();
+
+  // Exact match
   if (entries.includes(input)) return input;
 
+  // Case-insensitive exact match
   const exactCI = entries.find(e => e.toLowerCase() === lower);
   if (exactCI) return exactCI;
 
+  // Prefix match (e.g. "koba" → "kobayashi")
   const prefixMatches = entries.filter(e => e.toLowerCase().startsWith(lower));
   if (prefixMatches.length === 1) return prefixMatches[0]!;
 
+  // Substring match as last resort (e.g. "bayashi" → "kobayashi")
   const substringMatches = entries.filter(e => e.toLowerCase().includes(lower));
   if (substringMatches.length === 1) return substringMatches[0]!;
 
@@ -168,28 +122,16 @@ function loadUserMCPServers(): Record<string, SquadMCPServerConfig> | undefined 
 
     const result: Record<string, SquadMCPServerConfig> = {};
     for (const [name, server] of Object.entries(config.mcpServers)) {
+      // Skip the squad server itself to prevent circular session creation
       if (name === 'squad') continue;
-      const serverType = server.type ?? 'stdio';
 
-      if (serverType === 'http' || serverType === 'sse') {
-        // Remote MCP server
-        result[name] = {
-          type: serverType,
-          url: server.url,
-          headers: server.headers,
-          tools: server.tools ?? ['*'],
-        } as SquadMCPServerConfig;
-      } else {
-        // Local/stdio MCP server
-        result[name] = {
-          command: server.command,
-          args: server.args ?? [],
-          env: server.env,
-          cwd: server.cwd,
-          type: serverType,
-          tools: server.tools ?? ['*'],
-        } as SquadMCPServerConfig;
-      }
+      result[name] = {
+        command: server.command,
+        args: server.args ?? [],
+        env: server.env,
+        type: server.type ?? 'stdio',
+        tools: server.tools ?? ['*'],
+      } as SquadMCPServerConfig;
     }
 
     return Object.keys(result).length > 0 ? result : undefined;
@@ -210,9 +152,6 @@ export class AgentSessionManager {
   private readonly defaultModel: string | undefined;
   private readonly workingDirectory: string | undefined;
   private readonly charterCompiler: CharterCompiler;
-  private readonly mcpServers: Record<string, SquadMCPServerConfig> | undefined;
-  private readonly ceremonyEngine: CeremonyTriggerEngine | null;
-  private readonly contextWindowConfig: Partial<ContextWindowConfig> | undefined;
 
   /** Optional persistence layer for crash recovery */
   private persistence: ServerPersistence | null = null;
@@ -229,15 +168,6 @@ export class AgentSessionManager {
     this.defaultModel = config.defaultModel;
     this.workingDirectory = config.workingDirectory;
     this.charterCompiler = new CharterCompiler();
-    this.mcpServers = config.mcpServers ?? loadUserMCPServers();
-    this.contextWindowConfig = config.contextWindowConfig;
-    this.ceremonyEngine = config.ceremonies?.length
-      ? new CeremonyTriggerEngine(
-          config.ceremonies,
-          (agentName, message) => this.dispatch(agentName, message),
-          () => Array.from(this.sessions.keys()),
-        )
-      : null;
   }
 
   /**
@@ -300,23 +230,9 @@ export class AgentSessionManager {
     const charter = await this.compileCharter(resolved);
     const systemPrompt = await this.buildSystemPrompt(resolved, charter);
 
-    // SDK-enforced tool restrictions for built-in actors.
-    // Built-in actors (Ben, Coordinator, Sage) get ONLY their allowedTools —
-    // no file access, no git, no code analysis. This prevents role boundary
-    // violations deterministically through code, not charter prose.
-    const builtIn = getBuiltInActor(resolved);
-    const sessionTools = builtIn?.allowedTools
-      ? this.tools.filter(t => builtIn.allowedTools!.includes(t.name))
-      : this.tools;
-
-    // Note: MCP tools are provided via the MCP Bridge (tools/mcp-bridge.ts) which
-    // spawns MCP servers at squad server startup and registers their tools as squad tools.
-    // The native SessionConfig.mcpServers path is not used because the copilot CLI
-    // doesn't expose MCP server tools to programmatic SDK sessions.
-
     const sessionConfig: SquadSessionConfig = {
       model: charter.modelPreference ?? this.defaultModel,
-      tools: sessionTools,
+      tools: this.tools,
       systemMessage: {
         mode: 'replace' as const,
         content: systemPrompt,
@@ -334,27 +250,8 @@ export class AgentSessionManager {
       charter,
       createdAt: now,
       lastActiveAt: now,
-      messages: [],
-      contextWindowState: createContextWindowState(),
     };
     this.sessions.set(resolved, entry);
-
-    // Subscribe to session events to capture assistant responses
-    try {
-      session.on('message', (event) => {
-        const content = typeof event.content === 'string' ? event.content
-          : typeof event.text === 'string' ? event.text
-          : JSON.stringify(event);
-        entry.messages.push({
-          role: 'assistant',
-          content,
-          timestamp: new Date().toISOString(),
-        });
-        entry.lastActiveAt = new Date();
-      });
-    } catch {
-      // Session may not support event subscription — continue without
-    }
 
     // Persist registry after new session creation
     if (this.persistence) {
@@ -383,53 +280,17 @@ export class AgentSessionManager {
       ? `${message}\n\n<context>\n${context}\n</context>`
       : message;
 
-    this.ceremonyEngine?.onActivity();
+    await session.sendMessage({ prompt });
 
+    // Update last-active timestamp
     const entry = this.sessions.get(resolvedName);
     if (entry) {
       entry.lastActiveAt = new Date();
-      entry.messages.push({
-        role: 'user',
-        content: prompt,
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    // Use sendAndWait to capture the assistant's response
-    if (session.sendAndWait) {
-      try {
-        const result = await session.sendAndWait({ prompt }, 300_000);
-        const content = extractResponseContent(result);
-        if (entry) {
-          if (content) {
-            entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
-          } else if (result != null) {
-            // Agent completed its turn but returned empty text — likely did work via
-            // tool calls (file edits, commands). Record a placeholder so waitForResponse
-            // can detect that the turn finished instead of timing out.
-            entry.messages.push({
-              role: 'assistant',
-              content: TOOL_CALL_PLACEHOLDER,
-              timestamp: new Date().toISOString(),
-            });
-          }
-        }
-      } catch {
-        // Timeout or error — fall back to fire-and-forget
-        await session.sendMessage({ prompt });
-      }
-    } else {
-      await session.sendMessage({ prompt });
     }
 
     // Persist updated lastMessageAt
     if (this.persistence) {
       try { this.persistence.saveRegistry(this.getRegistryEntries()); } catch { /* best-effort */ }
-    }
-
-    // Apply context windowing if configured
-    if (this.contextWindowConfig && entry) {
-      await this.maybeApplyContextWindow(entry);
     }
 
     await this.eventBus.emit({
@@ -449,7 +310,8 @@ export class AgentSessionManager {
 
   /**
    * Compile a charter for the given agent.
-   * Priority: workspace .squad/agents/{name}/charter.md > SDK built-in actor > generic fallback.
+   * Reads charter.md from .squad/agents/{name}/charter.md.
+   * Falls back to a minimal default if the file doesn't exist.
    */
   async compileCharter(agentName: string): Promise<AgentCharter> {
     const charterPath = path.join(this.squadRoot, '.squad', 'agents', agentName, 'charter.md');
@@ -457,18 +319,7 @@ export class AgentSessionManager {
     try {
       return await this.charterCompiler.compile(charterPath);
     } catch {
-      const builtIn = getBuiltInActor(agentName);
-      if (builtIn) {
-        return {
-          name: builtIn.name,
-          displayName: builtIn.displayName,
-          role: builtIn.role,
-          expertise: builtIn.expertise,
-          style: builtIn.style,
-          prompt: builtIn.charter,
-        };
-      }
-
+      // Charter file missing or malformed — use a sensible default
       return {
         name: agentName,
         displayName: agentName,
@@ -502,13 +353,16 @@ export class AgentSessionManager {
     sections.push(charter.prompt);
     sections.push('');
 
-    // 3. Recent history — section-aware injection
-    //    Prioritize Learnings + Decisions (most actionable), then Patterns + Issues.
-    //    Skip raw Context section (already in charter) and References (low signal).
-    const historyInjection = this.buildHistoryInjection(agentName);
-    if (historyInjection) {
+    // 3. Recent history (last ~2KB)
+    const historyContent = this.readFileSafe(
+      path.join(this.squadRoot, '.squad', 'agents', agentName, 'history.md'),
+    );
+    if (historyContent) {
+      const trimmed = historyContent.length > MAX_HISTORY_BYTES
+        ? '...\n' + historyContent.slice(-MAX_HISTORY_BYTES)
+        : historyContent;
       sections.push('## Recent History\n');
-      sections.push(historyInjection);
+      sections.push(trimmed);
       sections.push('');
     }
 
@@ -522,93 +376,33 @@ export class AgentSessionManager {
       sections.push('');
     }
 
-    // 5. Available squad tools (SDK-injected)
+    // 5. Available squad tools
     const toolNames = this.tools.map(t => t.name);
-    const hasSDKTools = toolNames.some(n => n === 'squad_route');
-
-    // 6. Squad communication tools
-    // Agents inside squad sessions have SDK tools (squad_route, squad_send, etc.)
-    // List the actual tool names they can call.
-    sections.push('## Squad Communication\n');
-    sections.push('You can communicate with other squad members using these tools:');
-    sections.push('- `squad_route(targetAgent, task, context?)` — Send a task to another agent. Creates their session if needed.');
-    sections.push('- `squad_send(agentName, message)` — Send a message and wait for the response. Use for coordination and handoffs.');
-    sections.push('- `squad_read_session(agentName, lastN?)` — Read an agent\'s conversation history. Use to check progress or get results.');
-    sections.push('- `squad_decide(author, summary, body)` — Record a team decision to .squad/decisions/inbox/.');
-    sections.push('- `squad_memory(agent, section, content)` — Append to an agent\'s history for future sessions.');
-    sections.push('- `squad_status()` — Check session pool state.');
-    sections.push('');
-    sections.push('**Delegation pattern:** Use `squad_route` to dispatch work, `squad_read_session` to monitor progress, and `squad_send` to unblock agents or get synchronous responses.');
-    sections.push('');
+    if (toolNames.length > 0) {
+      sections.push('## Available Squad Tools\n');
+      sections.push(`You have access to these squad coordination tools: ${toolNames.join(', ')}`);
+      sections.push('Use squad_route to delegate work to other agents in the team.');
+      sections.push('Use squad_decide to record team decisions.');
+      sections.push('Use squad_memory to record learnings for future sessions.');
+      sections.push('Use squad_status to check on other agents and sessions.');
+      sections.push('');
+    }
 
     return sections.join('\n');
   }
 
   /**
-   * Merge global MCP servers with charter-declared MCP servers.
-   * 
-   * Charter's ## MCP Servers section can:
-   * 1. Reference servers by name → pulls config from global mcpServers (loaded from ~/.copilot/mcp-config.json)
-   * 2. Apply tool filters → overrides the tools list for that server
-   * 
-   * If a charter declares no MCP servers, all global servers are passed through (current behavior).
-   * If a charter declares specific servers, only those servers are included (whitelist mode).
-   */
-  private mergeMcpServers(charter: AgentCharter): Record<string, SquadMCPServerConfig> | undefined {
-    const charterMcp = charter.mcpServers;
-    
-    // No charter MCP declarations → pass through all global servers (backward compatible)
-    if (!charterMcp || Object.keys(charterMcp).length === 0) {
-      return this.mcpServers;
-    }
-
-    // No global servers to reference → nothing to merge
-    if (!this.mcpServers) {
-      return undefined;
-    }
-
-    // Charter declares specific servers → whitelist mode
-    const merged: Record<string, SquadMCPServerConfig> = {};
-
-    for (const [name, decl] of Object.entries(charterMcp)) {
-      const globalServer = this.mcpServers[name];
-      if (!globalServer) continue; // Charter references a server we don't have — skip
-
-      // Clone the global config and apply charter's tool filter if specified
-      const serverConfig = { ...globalServer };
-      if (decl.tools && decl.tools.length > 0) {
-        serverConfig.tools = decl.tools;
-      }
-      merged[name] = serverConfig;
-    }
-
-    return Object.keys(merged).length > 0 ? merged : undefined;
-  }
-
-  /**
    * Gracefully close a specific agent's session.
-   * Extracts learnings from the conversation and persists them to the
-   * agent's history shadow before destroying the session.
    */
   async closeSession(agentName: string): Promise<void> {
     const entry = this.sessions.get(agentName);
     if (!entry) return;
-
-    // Capture data BEFORE deletion for learning persistence
-    const capturedMessages = [...entry.messages];
-    const sessionDuration = Date.now() - entry.createdAt.getTime();
-
-    // Extract and persist learnings from this session (best-effort)
-    await this.persistSessionLearnings(agentName, capturedMessages);
 
     try {
       await entry.session.close();
     } catch {
       // Session may already be closed — that's fine
     }
-
-    // Remove from session pool to free capacity
-    this.client.pool.remove(entry.session.sessionId);
 
     this.sessions.delete(agentName);
 
@@ -622,21 +416,16 @@ export class AgentSessionManager {
       sessionId: entry.session.sessionId,
       agentName,
       payload: {
-        durationMs: sessionDuration,
-        messages: capturedMessages,
-        messageCount: capturedMessages.length,
+        durationMs: Date.now() - entry.createdAt.getTime(),
       },
       timestamp: new Date(),
     });
-
-    this.ceremonyEngine?.onSessionClosed(agentName);
   }
 
   /**
    * Close all active agent sessions.
    */
   async closeAll(): Promise<void> {
-    this.ceremonyEngine?.disable();
     const agents = Array.from(this.sessions.keys());
     await Promise.allSettled(agents.map(name => this.closeSession(name)));
   }
@@ -651,52 +440,7 @@ export class AgentSessionManager {
       createdAt: entry.createdAt,
       lastActiveAt: entry.lastActiveAt,
       charterRole: entry.charter.role,
-      messageCount: entry.messages.length,
     }));
-  }
-
-  /**
-   * Get conversation messages for a specific agent session.
-   */
-  getMessages(agentName: string): SessionMessage[] {
-    const resolved = resolveAgentName(this.squadRoot, agentName);
-    return this.sessions.get(resolved)?.messages ?? [];
-  }
-
-  /**
-   * Send a follow-up message to an existing agent session.
-   */
-  async sendFollowUp(agentName: string, message: string): Promise<string | null> {
-    const resolved = resolveAgentName(this.squadRoot, agentName);
-    const entry = this.sessions.get(resolved);
-    if (!entry) throw new Error(`No active session for ${resolved}`);
-
-    entry.messages.push({ role: 'user', content: message, timestamp: new Date().toISOString() });
-    entry.lastActiveAt = new Date();
-
-    // Use sendAndWait if available (returns when agent finishes its turn)
-    if (entry.session.sendAndWait) {
-      try {
-        const result = await entry.session.sendAndWait({ prompt: message }, 120_000);
-        const content = extractResponseContent(result);
-        if (content) {
-          entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
-        } else if (result != null) {
-          // Agent completed its turn with empty text — likely did work via tool calls.
-          const placeholder = TOOL_CALL_PLACEHOLDER;
-          entry.messages.push({ role: 'assistant', content: placeholder, timestamp: new Date().toISOString() });
-          return placeholder;
-        }
-        return content;
-      } catch {
-        // Timeout or error — fall back to fire-and-forget
-        await entry.session.sendMessage({ prompt: message });
-        return null;
-      }
-    }
-
-    await entry.session.sendMessage({ prompt: message });
-    return null;
   }
 
   /**
@@ -711,147 +455,6 @@ export class AgentSessionManager {
    */
   get activeCount(): number {
     return this.sessions.size;
-  }
-
-  /**
-   * Wait until no session has had activity for `idleMs` milliseconds.
-   * Resolves with a summary of what happened. Rejects on timeout.
-   */
-  waitForIdle(idleMs: number, timeoutMs: number): Promise<{ agents: string[]; totalMessages: number; durationMs: number }> {
-    const startTime = Date.now();
-    return new Promise((resolve, reject) => {
-      const check = () => {
-        if (Date.now() - startTime > timeoutMs) {
-          reject(new Error(`waitForIdle timed out after ${timeoutMs}ms`));
-          return;
-        }
-
-        const sessions = Array.from(this.sessions.values());
-        if (sessions.length === 0) {
-          resolve({ agents: [], totalMessages: 0, durationMs: Date.now() - startTime });
-          return;
-        }
-
-        const lastActivity = Math.max(...sessions.map(s => s.lastActiveAt.getTime()));
-        const elapsed = Date.now() - lastActivity;
-
-        if (elapsed >= idleMs) {
-          const agents = sessions.map(s => s.agentName);
-          const totalMessages = sessions.reduce((sum, s) => sum + s.messages.length, 0);
-          resolve({ agents, totalMessages, durationMs: Date.now() - startTime });
-          return;
-        }
-
-        setTimeout(check, Math.min(5000, idleMs - elapsed + 500));
-      };
-      setTimeout(check, idleMs);
-    });
-  }
-
-  /**
-   * Apply context windowing to a session if the message count exceeds the threshold.
-   * Replaces older messages with a summary to keep token usage bounded.
-   *
-   * Scope: This operates on Squad's tracking layer (entry.messages), which is the
-   * source for squad_read_session, inter-agent communication, and observability.
-   * The Copilot SDK session maintains its own LLM context internally.
-   */
-  private async maybeApplyContextWindow(entry: AgentSessionEntry): Promise<void> {
-    try {
-      const result = await applyContextWindow(
-        entry.messages,
-        entry.contextWindowState,
-        this.contextWindowConfig,
-      );
-
-      if (result.summarized) {
-        entry.messages = result.messages;
-        entry.contextWindowState = result.state;
-      }
-    } catch {
-      // Context windowing failure is non-fatal — continue with full history
-    }
-  }
-
-  /**
-   * Build a section-aware history injection for the system prompt.
-   *
-   * Prioritizes actionable sections (Learnings, Decisions) over contextual
-   * ones (Patterns, Issues). Respects MAX_HISTORY_BYTES budget. Returns
-   * null if no history exists or all sections are empty.
-   */
-  private buildHistoryInjection(agentName: string): string | null {
-    const historyContent = this.readFileSafe(
-      path.join(this.squadRoot, '.squad', 'agents', agentName, 'history.md'),
-    );
-    if (!historyContent) return null;
-
-    // Parse sections in priority order
-    const prioritySections = ['Learnings', 'Decisions', 'Patterns', 'Issues'] as const;
-    const extracted: string[] = [];
-    let totalLength = 0;
-
-    for (const sectionName of prioritySections) {
-      const sectionRegex = new RegExp(
-        `^##\\s+${sectionName}\\s*$([\\s\\S]*?)(?=^##\\s|$)`,
-        'm',
-      );
-      const match = historyContent.match(sectionRegex);
-      if (!match) continue;
-
-      const content = match[1]!.trim();
-      // Skip empty sections or placeholder comments
-      if (!content || /^<!--.*-->$/.test(content)) continue;
-
-      const sectionBlock = `### ${sectionName}\n\n${content}`;
-
-      // Respect budget — stop adding sections when we'd exceed the limit
-      if (totalLength + sectionBlock.length > MAX_HISTORY_BYTES) {
-        // Try to fit a truncated version
-        const remaining = MAX_HISTORY_BYTES - totalLength;
-        if (remaining > 100) {
-          extracted.push(`### ${sectionName}\n\n…${content.slice(-(remaining - 30))}`);
-        }
-        break;
-      }
-
-      extracted.push(sectionBlock);
-      totalLength += sectionBlock.length;
-    }
-
-    return extracted.length > 0 ? extracted.join('\n\n') : null;
-  }
-
-  /**
-   * Extract learnings from a session's messages and persist them to the
-   * agent's history shadow. Best-effort — failures are swallowed to avoid
-   * blocking session teardown.
-   */
-  private async persistSessionLearnings(
-    agentName: string,
-    messages: SessionMessage[],
-  ): Promise<void> {
-    try {
-      if (messages.length === 0) return;
-
-      const result = extractSessionLearnings(messages, agentName);
-      if (!result.hasContent) return;
-
-      // Ensure the history shadow exists
-      await createHistoryShadow(this.squadRoot, agentName);
-
-      // Append each extracted section
-      for (const learning of result.learnings) {
-        await appendToHistory(
-          this.squadRoot,
-          agentName,
-          learning.section,
-          learning.content,
-        );
-      }
-    } catch {
-      // Learning persistence is best-effort — never block session close
-    }
   }
 
   /**
