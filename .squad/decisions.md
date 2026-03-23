@@ -396,3 +396,170 @@ Definitive CLI completeness audit confirms all commands work post-publish.
 ---
 
 *Fresh start — Mission Control rebirth, 2026-03-08. Previous decisions archived.*
+
+---
+
+## SDK Init Shore-Up Initiative (2026-03-11)
+
+### Phase-Based SDK Quality Improvement Program
+
+**By:** Flight  
+**Date:** 2026-03-11  
+**Affects:** EECOM, CAPCOM, FIDO, Procedures
+
+SDK initialization produces incomplete state (config sync broken, built-in members missing, CastingEngine bypassed). Implement 3-phase approach prioritizing foundational gaps before comprehensive testing.
+
+**What:**
+1. **Phase 1 (P1):** Fix foundational gaps — config sync, Ralph inclusion, @copilot roster entry
+2. **Phase 2 (P1):** Wire CastingEngine into CLI init flow (restore universe curation quality)
+3. **Phase 3 (P2):** Exercise full test matrix (29 untested features → 100% SDK feature parity)
+
+**Why this order:**
+- Config sync must work before CastingEngine templates can rely on it
+- Stable init flow required before systematic feature verification
+- Phases 1-2 unblock SDK consumers immediately (Phase 3 is verification)
+
+**Ownership:**
+- **EECOM + CAPCOM:** Phases 1-2 (estimated 2 sprints)
+- **FIDO + CAPCOM:** Phase 3 (estimated 2 sprints)
+- **Procedures:** Partner on Phase 2 (universe template quality)
+
+**Success Criteria:**
+- Phase 1: All members (user-added, Ralph, @copilot) in `squad.config.ts` without manual edits
+- Phase 2: 90%+ init runs use curated templates (Apollo 13/Usual Suspects)
+- Phase 3: 100% SDK feature parity
+
+Full PRD: `.squad/identity/prd-sdk-init-shoreup.md`
+
+---
+
+### CastingEngine is the canonical casting system
+
+**By:** CAPCOM  
+**Date:** 2026-03-11  
+
+All team casting flows (CLI init, REPL auto-cast, manual casting) must use `CastingEngine.castTeam()`.
+
+**What:** Consolidate casting logic to avoid duplication of personality/role-matching. Use structured character data (personality, backstory, role) from universe templates instead of generic role-based personalities.
+
+**Why:** SDK already ships with CastingEngine — we should use it. Provides rich, themed characters instead of generic roles. Avoids duplication of casting logic across CLI and REPL.
+
+**Impact:** Requires refactoring `cli/core/cast.ts:personalityForRole()` and wiring coordinator universe selection to CastingEngine templates.
+
+---
+
+### squad.config.ts is the source of truth for SDK-mode projects
+
+**By:** CAPCOM  
+**Date:** 2026-03-11  
+
+When `squad.config.ts` exists, it is the canonical team roster. Markdown files (.squad/team.md, routing.md) are **generated output** from `squad build`.
+
+**What:** TypeScript config enables type-checking, validation, and better tooling. Markdown is regenerated from config during build.
+
+**Why:** Having two sources of truth (config + markdown) creates sync bugs. One source enables automated consistency.
+
+**Impact:**
+- `squad build` regenerates markdown from config
+- REPL init flow writes squad.config.ts after casting
+- Manual team.md edits in SDK mode trigger a warning (suggest `squad migrate --to sdk`)
+
+---
+
+### Ralph is a required built-in agent, always included
+
+**By:** CAPCOM  
+**Date:** 2026-03-11  
+
+Ralph (Work Monitor) is added automatically during init, just like Scribe.
+
+**What:** Ralph is a core framework component (work queue tracking, keep-alive monitoring). Include Ralph in both CLI init and REPL auto-cast flows.
+
+**Why:** Ralph is a core team member, not an optional add-on. Should be present in every Squad project.
+
+**Impact:** Add Ralph to the hardcoded agents array in `cli/core/init.ts` (both SDK init and REPL paths).
+
+---
+
+### SDK Init Implementation Priority Order
+
+**By:** EECOM  
+**Date:** 2026-03-11  
+
+Prioritize squad.config.ts sync fixes over new commands. Implement in this order:
+
+1. **Fix 1 — squad.config.ts sync utility** (regex-based, upgrade to AST if edge cases arise)
+2. **Fix 2, 7 — Ralph in CLI init + REPL init with prompt**
+3. **Fix 6 — CastingEngine integration** (augment LLM proposals with structured character data, don't replace LLM)
+4. **Fix 3, 4, 5 — hire/remove commands, @copilot flag** (polish, lower priority)
+
+**Why:** squad.config.ts sync is load-bearing for the rest. Ralph fixes are quick wins completing a half-implemented feature. CastingEngine is high-value but medium-risk. Hire/remove/flags are polish.
+
+**Open Questions:**
+- AST vs Regex for config parsing: Start with regex, upgrade if edge cases arise
+- CastingEngine augment vs replace: Keep LLM for flexibility, use CastingEngine to enrich proposals
+- Ralph always-on vs opt-in: Make Ralph always-included
+
+**Reference:** Full roadmap at `.squad/identity/sdk-init-implementation-roadmap.md`
+
+---
+
+### 2026-03-20T13:26:45Z: No cron jobs — ever
+**By:** Brady (via Copilot)
+**What:** No cron jobs in GitHub Actions — ever. Cron is permanently disabled in all workflows. We should not be shipping code that has cron turned on by default. It costs too much. This applies to our repo, the product templates, and the docs.
+**Why:** User request — captured for team memory. GitHub Actions cron burns minutes and money. Squad uses event-based triggers and local watch mode instead.
+
+---
+
+### 2026-03-20: CI Lockfile Lint + Edited Trigger
+**By:** Booster (CI/CD Engineer)
+**What:**
+1. Add `edited` to CI pull_request trigger types in `.github/workflows/squad-ci.yml` (types: [opened, synchronize, reopened, edited]) to catch PR retargeting.
+2. Add lockfile lint step before `npm ci` to detect stale nested workspace entries in `package-lock.json` with remediation: `Fix: delete these entries from package-lock.json and run npm install`.
+3. Changed repository default branch from `main` to `dev`.
+**Why:** 
+- PRs retargeted to different base branches need CI retrigger (standard GitHub Actions pattern).
+- Stale nested npm registry entries cause TypeScript type errors that are hard to diagnose; catching at lockfile level gives clear, actionable feedback.
+- Community PRs now naturally target `dev` without manual retargeting.
+
+---
+
+### 2026-03-11T12:10Z: Session handoff — SDKs are next priority
+**By:** Brady (via Copilot)
+**What:** Next session begins with SDK Init PRDs. The unified PRD consolidating #337-#342 is ready for implementation and is the team's top priority.
+**Why:** User request — captured for team memory.
+
+---
+
+### 2026-03-20: Press milestone — GitHub Blog + .NET Rocks!
+**By:** Brady (via Copilot)
+**What:** Squad featured on the GitHub Blog ("How Squad runs coordinated AI agents inside your repository") and .NET Rocks! Episode 1994, both published March 19, 2026. First major press coverage.
+**Why:** Team morale milestone. Validates the "repository-native multi-agent orchestration" positioning. Community visibility will likely drive new issues and contributors.
+
+---
+
+### 2026-03-19: Node 22+ ESM Resolution Fix Strategy
+**By:** Flight (Lead)
+**Date:** 2026-03-19
+**Issue:** #449
+**Status:** Proposed
+**What:** Dual-layer postinstall patching:
+1. Primary fix: Patch `vscode-jsonrpc/package.json` at postinstall to add the `exports` field (modeled on v9.x) to fix ALL subpath import resolution at source.
+2. Backup fix: Keep existing copilot-sdk `session.js` patch as defense-in-depth.
+3. Observability: Add a `squad doctor` check that detects whether `vscode-jsonrpc` has proper exports.
+4. CI: Add Node 22 and Node 24 to the CI smoke test matrix.
+**Why:**
+- `vscode-jsonrpc@8.2.1` lacks an `exports` field; Node 22+ strict ESM resolution rejects `vscode-jsonrpc/node` imports without `.js` extension.
+- Patching the package with missing exports is more robust than chasing individual import sites.
+- `vscode-jsonrpc` v9.x (which has exports) is all pre-release with no stable release timeline.
+- Node 22 is Active LTS — must-support for any package declaring `engines: >=20`.
+**Owners:** GNC (~1 day implementation), Booster (CI matrix), FIDO (ESM import smoke test).
+
+---
+
+### 2026-03-21: Gap analysis verification loop
+**By:** Procedures (Prompt Engineer)
+**What:** After Agent Work now includes Step 1b — Verification. When an issue has `- [ ]` checkboxes, a lightweight verification agent (claude-haiku-4.5, sync, different from the doer) independently checks each item against the work product before the coordinator proceeds. 2-retry cap, then escalate to user.
+**Why:** Agents were claiming "done" without completing all checklist items. The verification step enforces the checklist as a contract. Opt-in by structure — zero overhead for issues without checkboxes.
+**PR:** #473
+**Issue:** #472

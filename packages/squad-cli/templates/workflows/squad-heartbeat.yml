@@ -7,10 +7,7 @@ name: Squad Heartbeat (Ralph)
 # Run 'squad upgrade' to sync installed copies from source templates.
 
 on:
-  # DISABLED: Cron heartbeat commented out pre-migration — re-enable when ready
-  # schedule:
-  #   # Every 30 minutes — adjust or remove if not needed
-  #   - cron: '*/30 * * * *'
+  # CRON DISABLED — GitHub Actions cron costs too much. Use event triggers or `squad watch` instead.
 
   # React to completed work or new squad work
   issues:

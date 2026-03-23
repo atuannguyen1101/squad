@@ -254,7 +254,7 @@ When you see this, you can:
 
 ### 4. Use Ralph Between Sessions
 
-The `squad-heartbeat` workflow runs every 30 minutes (or on your schedule).
+The `squad-heartbeat` workflow runs Ralph on event-based triggers (issue close, PR merge, manual dispatch). For persistent polling when you're away from the keyboard, use `squad watch` locally.
 
 Ralph will:
 - Triage new issues

@@ -84,11 +84,8 @@ export class RalphMonitor {
       eventBus.subscribe('agent:milestone', (event) => this.handleEvent(event)),
     );
 
-    // DISABLED: Heartbeat timer commented out pre-migration — re-enable when ready
-    // const interval = this.config.healthCheckInterval ?? 30_000;
-    // this.healthCheckTimer = setInterval(() => {
-    //   void this.healthCheck();
-    // }, interval);
+    // CRON DISABLED — GitHub Actions cron costs too much. Use event triggers or `squad watch` instead.
+    // Heartbeat timer permanently removed; Ralph uses event-driven activation only.
   }
 
   /** Handle an incoming event from the EventBus */
