@@ -151,8 +151,11 @@ async function main(): Promise<void> {
     console.log(`  ${BOLD}loop${RESET}       Continuous work loop (Ralph mode)`);
     console.log(`             Usage: loop [--filter <label>] [--interval <minutes>]`);
     console.log(`             Default: checks every 10 minutes (Ctrl+C to stop)`);
-    console.log(`  ${BOLD}hire${RESET}       Team creation wizard`);
-    console.log(`             Usage: hire [--name <name>] [--role <role>]`);
+    console.log(`  ${BOLD}hire${RESET}       Hire a new agent onto the team`);
+    console.log(`             Usage: hire [--name <name>] [--role <role>] [--scope <scope>] [--yes]`);
+    console.log(`  ${BOLD}remove${RESET}     Remove an agent from the team (archive, not delete)`);
+    console.log(`             Usage: remove --agent <name> [--yes]`);
+    console.log(`             Alias: fire`);
     console.log(`  ${BOLD}copilot${RESET}    Add/remove the Copilot coding agent (@copilot)`);
     console.log(`             Usage: copilot [--off] [--auto-assign]`);
     console.log(`  ${BOLD}plugin${RESET}     Manage plugin marketplaces`);
@@ -321,17 +324,14 @@ async function main(): Promise<void> {
   }
 
   if (cmd === 'hire') {
-    const nameIdx = args.indexOf('--name');
-    const name = (nameIdx !== -1 && args[nameIdx + 1]) ? args[nameIdx + 1] : undefined;
-    const roleIdx = args.indexOf('--role');
-    const role = (roleIdx !== -1 && args[roleIdx + 1]) ? args[roleIdx + 1] : undefined;
-    console.log('👋 Squad hire — team creation wizard starting... (full implementation pending)');
-    if (name) {
-      console.log(`   Name: ${name}`);
-    }
-    if (role) {
-      console.log(`   Role: ${role}`);
-    }
+    const { runHire } = await import('./cli/commands/hire.js');
+    await runHire(args);
+    return;
+  }
+
+  if (cmd === 'remove' || cmd === 'fire') {
+    const { runRemove } = await import('./cli/commands/remove.js');
+    await runRemove(args);
     return;
   }
 
