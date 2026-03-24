@@ -572,18 +572,15 @@ export class AgentSessionManager {
         sections.push('');
       }
 
-      // 3. Project-specific instructions (auto-injected based on file paths)
-      if (workingFilePaths && workingFilePaths.length > 0) {
-        try {
-          const instructionsSection = injectInstructions(this.squadRoot, workingFilePaths);
-          if (instructionsSection) {
-            sections.push(instructionsSection);
-            sections.push('');
-          }
-        } catch (err) {
-          console.error(`[System Prompt] ✗ Error injecting instructions for ${agentName}: ${err}`);
-          // Continue without instructions - not critical
+      // 3. Project-specific instructions (auto-injected for all agents)
+      try {
+        const instructionsSection = injectInstructions(this.squadRoot);
+        if (instructionsSection) {
+          sections.push(instructionsSection);
+          sections.push('');
         }
+      } catch (err) {
+        console.error(`[System Prompt] ✗ Error injecting instructions for ${agentName}: ${err}`);
       }
 
       // 4. Recent history — section-aware injection

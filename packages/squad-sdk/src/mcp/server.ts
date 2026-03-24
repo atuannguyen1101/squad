@@ -1046,6 +1046,26 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             // After the done pulse (or timeout), grab the latest assistant reply
             const msgs = mgr.getMessages(agentName);
             const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
+            
+            // AUTO-EMIT DONE PULSE if agent didn't emit one manually
+            if (!donePulse) {
+              const responseContent = lastReply?.content ?? '';
+              const derivedSummary = responseContent.length > 100
+                ? responseContent.substring(0, 97) + '...'
+                : responseContent || 'Work completed';
+              pulseCollector.record(createPulse({
+                agent: agentName,
+                phase: 'done',
+                status: 'ok',
+                progressPct: 100,
+                summary: derivedSummary,
+                blockers: [],
+                questionsForUser: [],
+                artifacts: [],
+                nextStep: '',
+              }));
+            }
+            
             return {
               sessionId: result.sessionId,
               status: result.status,

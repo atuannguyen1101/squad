@@ -173,36 +173,40 @@ export function discoverInstructions(squadRoot: string): InstructionFile[] {
  * Discover all skill files in .squad/skills/ directory.
  */
 export function discoverSkills(squadRoot: string): InstructionFile[] {
-  const skillsDir = path.join(squadRoot, '.squad', 'skills');
+  const skillsDirs = [
+    path.join(squadRoot, '.squad', 'skills'),
+    path.join(squadRoot, '.github', 'skills'),
+  ];
   
-  if (!fs.existsSync(skillsDir)) {
-    return [];
-  }
+  const skills: InstructionFile[] = [];
   
-  try {
-    const subdirs = fs.readdirSync(skillsDir);
-    const skills: InstructionFile[] = [];
+  for (const skillsDir of skillsDirs) {
+    if (!fs.existsSync(skillsDir)) continue;
     
-    for (const subdir of subdirs) {
-      const subdirPath = path.join(skillsDir, subdir);
-      const stat = fs.statSync(subdirPath);
+    try {
+      const subdirs = fs.readdirSync(skillsDir);
       
-      if (stat.isDirectory()) {
-        // Look for SKILL.md in this directory
-        const skillFile = path.join(subdirPath, 'SKILL.md');
-        if (fs.existsSync(skillFile)) {
-          const parsed = parseInstructionFile(skillFile, 'skill');
-          if (parsed) {
-            skills.push(parsed);
+      for (const subdir of subdirs) {
+        const subdirPath = path.join(skillsDir, subdir);
+        const stat = fs.statSync(subdirPath);
+        
+        if (stat.isDirectory()) {
+          // Look for SKILL.md in this directory
+          const skillFile = path.join(subdirPath, 'SKILL.md');
+          if (fs.existsSync(skillFile)) {
+            const parsed = parseInstructionFile(skillFile, 'skill');
+            if (parsed) {
+              skills.push(parsed);
+            }
           }
         }
       }
+    } catch {
+      // Skip unreadable directory
     }
-    
-    return skills;
-  } catch (error) {
-    return [];
   }
+  
+  return skills;
 }
 
 /**
@@ -259,19 +263,37 @@ export function buildInstructionsSection(matched: InstructionFile[]): string {
 /**
  * Full pipeline: discover, match, and build instructions section.
  * This is the main entry point for the instruction injection system.
+ * 
+ * When filePaths are provided, only injects instructions/skills matching those paths.
+ * When no filePaths: injects all instructions (universal rules) plus skills that
+ * have applyTo: "**" (universal skills). Skills without applyTo are not auto-injected
+ * — agents read them on-demand via file tools when their charter says to.
  */
 export function injectInstructions(
   squadRoot: string,
-  filePaths: string[],
+  filePaths?: string[],
 ): string {
   // Discover all available instructions and skills
   const instructions = discoverInstructions(squadRoot);
   const skills = discoverSkills(squadRoot);
   const all = [...instructions, ...skills];
   
-  // Match against file paths
-  const matched = matchInstructions(all, filePaths);
+  if (filePaths && filePaths.length > 0) {
+    // Match against specific file paths
+    const matched = matchInstructions(all, filePaths);
+    return buildInstructionsSection(matched);
+  }
   
-  // Build section
-  return buildInstructionsSection(matched);
+  // No file paths — inject instructions (all, since they use applyTo: "**")
+  // and skills that explicitly have universal applyTo patterns.
+  // Skills without applyTo are available on-demand, not auto-injected.
+  const universalItems = all.filter(item => {
+    // Instructions are always injected (they have applyTo: "**" in standard config)
+    if (item.type === 'instruction') return true;
+    // Skills with universal patterns are injected
+    if (item.applyTo.some(p => p === '**' || p === '*')) return true;
+    return false;
+  });
+  
+  return buildInstructionsSection(universalItems);
 }

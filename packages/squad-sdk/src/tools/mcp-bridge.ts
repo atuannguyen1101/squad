@@ -22,6 +22,8 @@ export interface McpBridgeConfig {
   configPath?: string;
   /** Server names to skip (e.g., 'squad' to avoid circular spawning) */
   skipServers?: string[];
+  /** Regex pattern for server names to skip (e.g., /squad/i skips squad-portal, squad-ben) */
+  skipPattern?: RegExp;
   /** Squad root directory for workspace config resolution */
   squadRoot?: string;
 }
@@ -55,6 +57,7 @@ export class McpBridge {
     this.config = {
       configPath: config.configPath,
       skipServers: config.skipServers ?? ['squad'],
+      skipPattern: config.skipPattern,
       squadRoot: config.squadRoot,
     };
   }
@@ -69,6 +72,7 @@ export class McpBridge {
 
     for (const [name, server] of Object.entries(mcpConfig)) {
       if (this.config.skipServers?.includes(name)) continue;
+      if (this.config.skipPattern?.test(name)) continue;
 
       const serverType = server.type ?? 'stdio';
 
@@ -280,8 +284,11 @@ export class McpBridge {
   private readConfigFromPath(configPath: string): Record<string, McpServerEntry> | null {
     try {
       const raw = fs.readFileSync(configPath, 'utf-8');
-      const config = JSON.parse(raw) as { mcpServers?: Record<string, McpServerEntry> };
-      return config.mcpServers ?? null;
+      const config = JSON.parse(raw) as {
+        mcpServers?: Record<string, McpServerEntry>;
+        servers?: Record<string, McpServerEntry>;
+      };
+      return config.mcpServers ?? config.servers ?? null;
     } catch {
       return null;
     }

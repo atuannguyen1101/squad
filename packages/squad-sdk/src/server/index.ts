@@ -194,7 +194,11 @@ export class SquadServer {
     await this.client.connect();
 
     // 1b. Initialize MCP Bridge — spawn external MCP servers and discover tools
-    this.mcpBridge = new McpBridge({ skipServers: ['squad'] });
+    this.mcpBridge = new McpBridge({
+      squadRoot,
+      skipServers: ['squad'],
+      skipPattern: /squad/i,
+    });
     try {
       const bridgedTools = await this.mcpBridge.initialize();
       for (const tool of bridgedTools) {
@@ -223,7 +227,16 @@ export class SquadServer {
     this.sessionManager.setPersistence(this.persistence, this.serverStartedAt);
     const savedState = this.persistence.loadState();
     if (savedState) {
-      process.stderr.write(`[persistence] Recovered state: ${savedState.sessions.length} session(s) from ${savedState.savedAt}\n`);
+      process.stderr.write(`[persistence] Previous state had ${savedState.sessions.length} session(s) from ${savedState.savedAt} — clearing stale state for fresh start\n`);
+      // Clear stale state: old sessions can't be reconnected after process restart
+      this.persistence.saveState({
+        version: 1,
+        savedAt: new Date().toISOString(),
+        serverStartedAt: this.serverStartedAt,
+        sessions: [],
+        poolSize: 0,
+        poolCapacity: this.client.pool.size,
+      });
     }
 
     // 3. Initialize the coordinator with fan-out deps wired to session manager

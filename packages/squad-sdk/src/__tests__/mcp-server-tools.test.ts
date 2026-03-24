@@ -28,7 +28,7 @@ describe('MCP Server — publicTools Set (structural)', () => {
 
   // Extract the publicTools set from source
   const publicToolsMatch = serverSource.match(
-    /const publicTools\s*=\s*new Set\(\[\s*([\s\S]*?)\]\)/,
+    /(?:export\s+)?const\s+(?:publicTools|DEFAULT_PUBLIC_TOOLS)\s*=\s*new Set\(\[\s*([\s\S]*?)\](?:\s*as\s*const)?\s*\)/,
   );
   const publicToolsBlock = publicToolsMatch?.[1] ?? '';
   const publicToolNames = publicToolsBlock
