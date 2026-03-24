@@ -108,8 +108,8 @@ function parseInstructionFile(filePath: string, type: 'instruction' | 'skill'): 
     const content = fs.readFileSync(filePath, 'utf-8');
     const { frontmatter, body } = parseFrontmatter(content);
     
-    // Extract title from frontmatter or filename
-    const title = frontmatter.title || path.basename(filePath, path.extname(filePath));
+    // Extract title from frontmatter (name or title field) or filename
+    const title = frontmatter.name || frontmatter.title || path.basename(filePath, path.extname(filePath));
     
     // Extract applyTo patterns (may be a single string or array)
     let applyTo: string[] = [];
