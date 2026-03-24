@@ -269,3 +269,10 @@ Session artifacts:
 - - **Implementation**: Added `continueOnPartialFailure` field to `PhaseDefinition` type
 - - **UX**: Added note in review task: "Some subtasks may have failed. Review the work that was completed."
 - - SDK rebuilt successfully with `npx tsc --build --force`
+### Agent Name Extraction Test Coverage (#577)
+
+Extracted inline regex-based agent name parsing from `shell/index.ts` into a testable pure function `parseAgentFromDescription` in `shell/agent-name-parser.ts`. Created 30 tests across 7 categories: happy path, emoji variations, case insensitivity, fuzzy fallback, no-match, edge cases, and adversarial inputs. The function uses a 3-tier matching strategy: (1) leading emoji+name+colon regex, (2) name+colon anywhere regex, (3) fuzzy word-boundary match against known agent names. Shell index.ts now imports and delegates to this function. Build and tests green.
+
+**Learning:** Inline regex logic in UI code is untestable and fragile. Extracting to a pure function with explicit inputs (description string + known names array) makes it trivially testable and enables VOX's parallel fix to land cleanly.
+
+📌 **Team update (2026-03-23T23:15Z):** Orchestration complete. Agent name extraction refactor shipped: FIDO's parser module (30 tests, all passing), VOX's 3-tier cascading patterns, Procedures' spawn template standardization. All decisions merged to decisions.md. Agent IDs now display correctly in Copilot CLI. Canonical patterns: `agent-name-parser.ts` is source of truth for extraction logic.
