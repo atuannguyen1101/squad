@@ -1045,7 +1045,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           status: implState.status === 'completed' ? 'ok' : 'error',
           progressPct: 100,
           summary: implState.status === 'completed'
-            ? 'Pipeline complete. All phases passed.'
+            ? 'Pipeline complete. All phases passed.\n\nUse squad_run or squad_ask for all interactions — Ben is your interface.'
             : 'Pipeline failed. Check phase results.',
           blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
         }));
