@@ -41,6 +41,7 @@ export const DEFAULT_POOL_CONFIG: SessionPoolConfig = {
 
 interface QueuedSpawn {
   session: SquadSession;
+  promise: Promise<void>;
   resolve: () => void;
   reject: (error: Error) => void;
   queuedAt: Date;
@@ -109,6 +110,7 @@ export class SessionPool {
 
     this.spawnQueue.push({
       session,
+      promise,
       resolve,
       reject,
       queuedAt: new Date(),
@@ -210,8 +212,9 @@ export class SessionPool {
       this.cleanupTimer = null;
     }
     
-    // Reject all queued spawns
+    // Reject all queued spawns and suppress unhandled rejections
     for (const queued of this.spawnQueue) {
+      queued.promise.catch(() => {});
       queued.reject(new Error('SessionPool shutting down'));
     }
     this.spawnQueue = [];
