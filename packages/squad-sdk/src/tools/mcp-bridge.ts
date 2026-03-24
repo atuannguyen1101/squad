@@ -10,6 +10,8 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { defineTool } from './index.js';
 import type { SquadTool, SquadToolResult } from '../adapter/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -109,10 +111,22 @@ export class McpBridge {
         command: server.command!,
         args: server.args ?? [],
         env: { ...process.env, ...(server.env ?? {}) } as Record<string, string>,
-        cwd: server.cwd,
+        cwd: server.cwd ?? this.config.squadRoot,
       });
     } else if (serverType === 'http') {
-      transport = await this.createHttpTransport(server.url!, server.headers);
+      const url = new URL(server.url!);
+      transport = new StreamableHTTPClientTransport(url, {
+        requestInit: {
+          headers: server.headers ?? {},
+        },
+      });
+    } else if (serverType === 'sse') {
+      const url = new URL(server.url!);
+      transport = new SSEClientTransport(url, {
+        requestInit: {
+          headers: server.headers ?? {},
+        },
+      });
     } else {
       throw new Error(`Unsupported server type: ${serverType}`);
     }
@@ -147,39 +161,6 @@ export class McpBridge {
 
     this.servers.set(name, { name, client, transport, tools: toolNames });
     console.error(`[mcp-bridge] Connected to ${name} (${serverType}): ${toolNames.length} tools (${toolNames.slice(0, 5).join(', ')}${toolNames.length > 5 ? '...' : ''})`);
-  }
-
-  /**
-   * Create an HTTP transport for MCP servers.
-   */
-  private async createHttpTransport(url: string, headers?: Record<string, string>): Promise<Transport> {
-    // HTTP transport implementation using fetch
-    const httpTransport: Transport = {
-      async start() {
-        // HTTP transport doesn't need startup
-      },
-      async send(message: any) {
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(headers ?? {}),
-          },
-          body: JSON.stringify(message),
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
-        return response.json();
-      },
-      async close() {
-        // HTTP transport doesn't need cleanup
-      },
-    };
-
-    return httpTransport;
   }
 
   /**
