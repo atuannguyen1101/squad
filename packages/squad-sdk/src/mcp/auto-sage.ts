@@ -123,14 +123,18 @@ export async function triggerAutoSageAnalysis(deps: AutoSageDeps): Promise<AutoS
     dispatched = false;
   }
 
-  // 4. Emit pulse with results
+  // 4. Emit pulse with results — include Sage's actual findings so squad_wait surfaces them
+  const sageSummary = sageResponse
+    ? truncateSageResponse(sageResponse)
+    : 'Sage dispatch failed — no analysis available.';
+
   deps.pulseCollector.record(createPulse({
     agent: 'sage',
     phase: dispatched ? 'done' : 'blocked',
     status: dispatched ? 'ok' : 'warning',
     progressPct: 100,
     summary: dispatched
-      ? 'Auto-analysis complete. Sage has reviewed the run.'
+      ? `Post-run analysis:\n${sageSummary}`
       : 'Auto-analysis report generated but Sage dispatch failed.',
     blockers: dispatched ? [] : ['Sage dispatch failed'],
     questionsForUser: [],
@@ -139,4 +143,14 @@ export async function triggerAutoSageAnalysis(deps: AutoSageDeps): Promise<AutoS
   }));
 
   return { report, sageResponse, dispatched };
+}
+
+/**
+ * Truncate Sage's response to fit in a pulse summary.
+ * Keeps the first ~500 chars to surface key findings without overwhelming.
+ */
+function truncateSageResponse(response: string): string {
+  const maxLength = 500;
+  if (response.length <= maxLength) return response;
+  return response.slice(0, maxLength) + '\n...(use squad_analyze_run for full report)';
 }
