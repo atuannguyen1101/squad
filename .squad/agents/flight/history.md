@@ -205,3 +205,19 @@ Session artifacts:
 - - ✅ Added missing cross-squad orchestration exports to SDK index.ts
 - - ✅ Added `./mcp` and `./server` subpath exports to SDK package.json
 - ### **Files Created/Modified:**
+### Release Hardening Plan — Finalized (2026-07-22)
+
+Brady approved scope for remaining v0.9.1 incident hardening. Three issues to execute, three deferred into umbrella:
+
+**DO:** #564 (rewrite PUBLISH-README.md as living playbook — absorbs #558, #559, #560), #557 (CI lint rule rejecting non-workspace `npm publish` in workflow YAML), #562 (delete ghost workflow `publish-npm.yml` ID 250121956).
+
+**DEFERRED into #564:** #560 (pre-flight checklist → playbook section), #559 (fallback protocol → playbook section), #558 (422 race docs → playbook section).
+
+**Key findings:**
+- GitHub REST API has NO "Delete a workflow" endpoint. Ghost workflows only disappear when all their runs are deleted (GitHub GC). Procedure: `gh api` to list+delete all runs for workflow ID 250121956, then wait for GC.
+- The lint rule goes in `squad-ci.yml` as a `publish-policy` job: scans `.github/workflows/*.yml` for `npm publish` without `-w` flag. Blocks PR merge if violated.
+- PUBLISH-README.md playbook has 11 sections covering pre-flight, CI publish, manual fallback, 422 race conditions, insider channel, workspace policy, post-publish verification, and version bumping. Replaces the stale v0.8.22 stub entirely.
+
+**Execution order:** #562 (Brady, manual API call) and #557 (FIDO/Procedures, CI change) run in parallel. #564 (Procedures+Surgeon, playbook) goes last so it can reference the lint rule.
+
+Decision written to `.squad/decisions/inbox/flight-release-hardening-plan.md`.
