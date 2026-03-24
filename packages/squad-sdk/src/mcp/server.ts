@@ -898,12 +898,22 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           }));
         },
         onPhaseComplete: (result) => {
+          // Include agent response in pulse so findings surface through squad_wait
+          const agentResponse = typeof result.output === 'string' && result.output.length > 0
+            ? result.output.slice(0, 500) + (result.output.length > 500 ? '\n...(truncated)' : '')
+            : '';
+          const summary = result.error
+            ? result.error
+            : agentResponse
+              ? `${agentResponse}`
+              : `Phase ${result.phaseId} completed`;
+
           pulseCollector.record(createPulse({
             agent: result.agent,
             phase: result.status === 'completed' ? 'done' : 'blocked',
             status: result.status === 'completed' ? 'ok' : 'error',
             progressPct: result.status === 'completed' ? 100 : 0,
-            summary: result.error ?? `Phase ${result.phaseId} completed`,
+            summary,
             blockers: result.error ? [result.error] : [],
             questionsForUser: [], artifacts: [], nextStep: '',
           }));
