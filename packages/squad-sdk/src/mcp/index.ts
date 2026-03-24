@@ -1,5 +1,11 @@
 export { MCPServer, type MCPTool, type MCPToolHandler } from './protocol.js';
-export { createSquadMCPServer, type SquadMCPServerOptions } from './server.js';
+export {
+  createSquadMCPServer,
+  type SquadMCPServerOptions,
+  DEFAULT_PUBLIC_TOOLS,
+  INTERNAL_TOOLS,
+  ALL_TOOLS,
+} from './server.js';
 export { analyzeRun, formatAnalysisReport } from './analyze-run.js';
 export {
   isPortAvailable,
