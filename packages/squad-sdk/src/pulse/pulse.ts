@@ -84,8 +84,10 @@ export class PulseCollector {
   private pulseListeners: Array<(pulse: Pulse) => void> = [];
   private progressWarningListener?: (agent: string, oldProgress: number, newProgress: number) => void;
   private messageCountWarningThreshold: number = 25;
+  private messageCountHardLimit: number = 80;
   private messageCountsByAgent: Map<string, number> = new Map();
   private messageCountWarningsEmitted: Set<string> = new Set();
+  private onMessageLimitExceeded?: (agentName: string, count: number) => void;
 
   setOnUserRelevantPulse(callback: (pulse: Pulse) => void): void {
     this.onUserRelevantPulse = callback;
@@ -100,14 +102,39 @@ export class PulseCollector {
   }
 
   /**
-   * Track a message for an agent and check if threshold is exceeded.
+   * Track a message for an agent and check thresholds.
+   * Returns true if the message was accepted, false if the hard limit was hit.
    */
-  trackMessage(agentName: string): void {
+  trackMessage(agentName: string): boolean {
     const currentCount = this.messageCountsByAgent.get(agentName) || 0;
     const newCount = currentCount + 1;
     this.messageCountsByAgent.set(agentName, newCount);
 
-    // Emit warning if threshold exceeded and not already warned
+    // Hard limit: circuit breaker — notify callback to close session
+    if (newCount >= this.messageCountHardLimit) {
+      const limitPulse: Pulse = {
+        agent: 'System',
+        phase: 'reviewing',
+        status: 'error',
+        progressPct: 0,
+        summary: `Session terminated: ${agentName} hit message hard limit (${this.messageCountHardLimit}). Task needs decomposition.`,
+        blockers: [`${agentName} exceeded ${this.messageCountHardLimit} message limit`],
+        questionsForUser: [],
+        artifacts: [],
+        nextStep: 'Split task into smaller subtasks',
+        timestamp: new Date().toISOString(),
+      };
+      this.pulses.push(limitPulse);
+      const filter = filterPulseForUser(limitPulse);
+      if (filter.userRelevant) {
+        this.userQueue.push(limitPulse);
+        this.onUserRelevantPulse?.(limitPulse);
+      }
+      this.onMessageLimitExceeded?.(agentName, newCount);
+      return false;
+    }
+
+    // Soft warning at threshold
     if (newCount >= this.messageCountWarningThreshold && 
         !this.messageCountWarningsEmitted.has(agentName)) {
       this.messageCountWarningsEmitted.add(agentName);
@@ -130,6 +157,7 @@ export class PulseCollector {
         this.onUserRelevantPulse?.(warningPulse);
       }
     }
+    return true;
   }
 
   record(pulse: Pulse): PulseFilter {
@@ -315,6 +343,22 @@ export class PulseCollector {
    */
   setMessageCountWarningThreshold(threshold: number): void {
     this.messageCountWarningThreshold = threshold;
+  }
+
+  /**
+   * Set the hard message limit (circuit breaker).
+   * When an agent exceeds this, the onMessageLimitExceeded callback fires.
+   */
+  setMessageCountHardLimit(limit: number): void {
+    this.messageCountHardLimit = limit;
+  }
+
+  /**
+   * Set callback for when an agent hits the hard message limit.
+   * Use this to close the agent's session.
+   */
+  setOnMessageLimitExceeded(callback: (agentName: string, count: number) => void): void {
+    this.onMessageLimitExceeded = callback;
   }
 
   /**

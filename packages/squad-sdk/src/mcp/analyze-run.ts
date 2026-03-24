@@ -302,9 +302,12 @@ function buildNarrativeSummary(agents: AgentRunSummary[], metrics: RunAnalysisRe
 export function analyzeRun(input: RunAnalysisInput): RunAnalysisReport {
   const { pulses, sessions } = input;
 
-  // Collect unique agent names from both sources
+  // Collect unique agent names from both sources, excluding SDK internals
+  const INTERNAL_PULSE_AGENTS = new Set(['System']);
   const agentNames = new Set<string>();
-  for (const p of pulses) agentNames.add(p.agent);
+  for (const p of pulses) {
+    if (!INTERNAL_PULSE_AGENTS.has(p.agent)) agentNames.add(p.agent);
+  }
   for (const s of sessions) agentNames.add(s.agentName);
 
   // Build per-agent summaries

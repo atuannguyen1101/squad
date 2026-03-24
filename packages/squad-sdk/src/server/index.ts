@@ -225,6 +225,13 @@ export class SquadServer {
 
     // Wire persistence into session manager and load any saved state
     this.sessionManager.setPersistence(this.persistence, this.serverStartedAt);
+
+    // Wire circuit breaker: close agent sessions that exceed hard message limit
+    this.pulseCollector.setOnMessageLimitExceeded((agentName, count) => {
+      process.stderr.write(`[circuit-breaker] ${agentName} hit ${count} messages — closing session\n`);
+      this.sessionManager?.closeSession(agentName).catch(() => {});
+    });
+
     const savedState = this.persistence.loadState();
     if (savedState) {
       process.stderr.write(`[persistence] Previous state had ${savedState.sessions.length} session(s) from ${savedState.savedAt} — clearing stale state for fresh start\n`);

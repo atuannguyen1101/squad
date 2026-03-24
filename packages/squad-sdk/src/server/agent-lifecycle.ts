@@ -286,8 +286,8 @@ export class AgentSessionManager {
    * Sessions are keyed by agent name — each agent has at most one active session.
    */
   async getOrCreateSession(agentName: string): Promise<{ session: SquadSession; created: boolean; resolvedName: string }> {
-    // Resolve abbreviated names (e.g. "koba" → "kobayashi")
-    const resolved = resolveAgentName(this.squadRoot, agentName);
+    // Resolve abbreviated names (e.g. "koba" → "kobayashi") then normalize case
+    const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
 
     const existing = this.sessions.get(resolved);
     if (existing) {
@@ -461,7 +461,7 @@ export class AgentSessionManager {
    * The system prompt will be updated on the next session creation to include relevant instructions.
    */
   setWorkingFilePaths(agentName: string, filePaths: string[]): void {
-    const resolved = resolveAgentName(this.squadRoot, agentName);
+    const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
     const entry = this.sessions.get(resolved);
     if (entry) {
       entry.workingFilePaths = filePaths;
@@ -472,7 +472,7 @@ export class AgentSessionManager {
    * Get the working file paths for an agent session.
    */
   getWorkingFilePaths(agentName: string): string[] | undefined {
-    const resolved = resolveAgentName(this.squadRoot, agentName);
+    const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
     const entry = this.sessions.get(resolved);
     return entry?.workingFilePaths;
   }
@@ -794,7 +794,7 @@ You can communicate with other squad members using these tools:
    * Get conversation messages for a specific agent session.
    */
   getMessages(agentName: string): SessionMessage[] {
-    const resolved = resolveAgentName(this.squadRoot, agentName);
+    const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
     return this.sessions.get(resolved)?.messages ?? [];
   }
 
@@ -802,7 +802,7 @@ You can communicate with other squad members using these tools:
    * Send a follow-up message to an existing agent session.
    */
   async sendFollowUp(agentName: string, message: string): Promise<string | null> {
-    const resolved = resolveAgentName(this.squadRoot, agentName);
+    const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
     const entry = this.sessions.get(resolved);
     if (!entry) throw new Error(`No active session for ${resolved}`);
 
