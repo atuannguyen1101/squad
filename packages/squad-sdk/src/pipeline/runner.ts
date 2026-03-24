@@ -130,7 +130,7 @@ export class PipelineRunner {
         const response = dispatchResult.response ?? await this.deps.waitForResponse(phase.agent, timeout);
 
         const output = response ?? undefined;
-        const gatePass = output != null && phase.gate.validate(output);
+        const gatePass = output != null && await Promise.resolve(phase.gate.validate(output));
         const status: PhaseStatus = gatePass ? 'completed' : 'failed';
         const completedAt = new Date();
 
@@ -172,6 +172,16 @@ export class PipelineRunner {
 
   private shouldSkip(phase: PhaseDefinition): boolean {
     if (!phase.dependsOn?.length) return false;
+    
+    // If continueOnPartialFailure is true, only skip if ALL dependencies failed
+    if (phase.continueOnPartialFailure) {
+      return phase.dependsOn.every(depId => {
+        const depResult = this.state.phaseResults.get(depId);
+        return depResult?.status === 'failed';
+      });
+    }
+    
+    // Default behavior: skip if ANY dependency failed
     return phase.dependsOn.some(depId => {
       const depResult = this.state.phaseResults.get(depId);
       return depResult?.status === 'failed';

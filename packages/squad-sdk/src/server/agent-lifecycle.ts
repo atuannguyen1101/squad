@@ -28,6 +28,7 @@ import {
   type ContextWindowConfig,
   type ContextWindowState,
 } from '../context/index.js';
+import { injectInstructions } from '../agents/instruction-injector.js';
 
 // ============================================================================
 // Types
@@ -75,6 +76,8 @@ export interface AgentSessionEntry {
   messages: SessionMessage[];
   /** Context windowing state — tracks summarization progress */
   contextWindowState: ContextWindowState;
+  /** File paths this agent is working on (for instruction injection) */
+  workingFilePaths?: string[];
 }
 
 export interface DispatchResult {
@@ -298,7 +301,12 @@ export class AgentSessionManager {
     }
 
     const charter = await this.compileCharter(resolved);
-    const systemPrompt = await this.buildSystemPrompt(resolved, charter);
+    
+    // Get working file paths from existing session (if any) for instruction injection
+    const existingEntry = this.sessions.get(resolved);
+    const workingFilePaths = existingEntry?.workingFilePaths;
+    
+    const systemPrompt = await this.buildSystemPrompt(resolved, charter, workingFilePaths);
 
     // SDK-enforced tool restrictions for built-in actors.
     // Built-in actors (Ben, Coordinator, Sage) get ONLY their allowedTools —
@@ -448,6 +456,28 @@ export class AgentSessionManager {
   }
 
   /**
+   * Set the working file paths for an agent session.
+   * This enables instruction injection based on which files the agent is working on.
+   * The system prompt will be updated on the next session creation to include relevant instructions.
+   */
+  setWorkingFilePaths(agentName: string, filePaths: string[]): void {
+    const resolved = resolveAgentName(this.squadRoot, agentName);
+    const entry = this.sessions.get(resolved);
+    if (entry) {
+      entry.workingFilePaths = filePaths;
+    }
+  }
+
+  /**
+   * Get the working file paths for an agent session.
+   */
+  getWorkingFilePaths(agentName: string): string[] | undefined {
+    const resolved = resolveAgentName(this.squadRoot, agentName);
+    const entry = this.sessions.get(resolved);
+    return entry?.workingFilePaths;
+  }
+
+  /**
    * Compile a charter for the given agent.
    * Priority: workspace .squad/agents/{name}/charter.md > SDK built-in actor > generic fallback.
    */
@@ -483,8 +513,12 @@ export class AgentSessionManager {
   /**
    * Build the full system prompt for an agent session.
    * Combines charter content, recent history, team decisions, and tool descriptions.
+   * 
+   * @param agentName - The agent name
+   * @param charter - The compiled charter
+   * @param workingFilePaths - Optional list of file paths the agent is working on (for instruction injection)
    */
-  private async buildSystemPrompt(agentName: string, charter: AgentCharter): Promise<string> {
+  private async buildSystemPrompt(agentName: string, charter: AgentCharter, workingFilePaths?: string[]): Promise<string> {
     const sections: string[] = [];
 
     // 1. Agent identity header
@@ -502,7 +536,16 @@ export class AgentSessionManager {
     sections.push(charter.prompt);
     sections.push('');
 
-    // 3. Recent history — section-aware injection
+    // 3. Project-specific instructions (auto-injected based on file paths)
+    if (workingFilePaths && workingFilePaths.length > 0) {
+      const instructionsSection = injectInstructions(this.squadRoot, workingFilePaths);
+      if (instructionsSection) {
+        sections.push(instructionsSection);
+        sections.push('');
+      }
+    }
+
+    // 4. Recent history — section-aware injection
     //    Prioritize Learnings + Decisions (most actionable), then Patterns + Issues.
     //    Skip raw Context section (already in charter) and References (low signal).
     const historyInjection = this.buildHistoryInjection(agentName);
@@ -512,7 +555,7 @@ export class AgentSessionManager {
       sections.push('');
     }
 
-    // 4. Team decisions
+    // 5. Team decisions
     const decisionsContent = this.readFileSafe(
       path.join(this.squadRoot, '.squad', 'decisions.md'),
     );
@@ -522,11 +565,11 @@ export class AgentSessionManager {
       sections.push('');
     }
 
-    // 5. Available squad tools (SDK-injected)
+    // 6. Available squad tools (SDK-injected)
     const toolNames = this.tools.map(t => t.name);
     const hasSDKTools = toolNames.some(n => n === 'squad_route');
 
-    // 6. Squad communication tools
+    // 7. Squad communication tools
     // Agents inside squad sessions have SDK tools (squad_route, squad_send, etc.)
     // List the actual tool names they can call.
     sections.push('## Squad Communication\n');

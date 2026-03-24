@@ -264,6 +264,23 @@ When a session context has file-creation tools disabled (e.g., sandbox restricti
 - - If agent hasn't emitted pulse in 60 seconds, auto-generate "still working" pulse
 - - Auto-pulse format: phase="analyzing", status="ok", note="auto-generated"
 - Now let me add P1 #3 - Auto-pulse safety net. I need to add a method that generates a "still working" pulse if no pulse has been emitted for a while. Let me add this to the PulseCol...
+### 2026-03-23
+
+- The gate validation functions are now async, so the tests need to await them.. Also, the text appears to actually contain "ADO" but the test is expecting exact case.
+### 2026-03-23
+
+- Good! The test failures are just test cleanup issues (EBUSY errors on Windows - file locking issues), not actual logic failures. The important thing is that the pipeline-related tests all passed. Let 
+- - If agent is an implementer, gate still requires substantial code output or done pulse
+- - Includes note in task: "Some subtasks may have failed. Review the work that was completed."
+- - Still require substantial output from implementer roles
+- - Added note in review task: "Some subtasks ma...
+### 2026-03-23
+
+- Good! The test failures are just test cleanup issues (EBUSY errors on Windows - file locking issues), not actual logic failures. The important thing is that the pipeline-related tests all passed. Let 
+- - If agent is an implementer, gate still requires substantial code output or done pulse
+- - Includes note in task: "Some subtasks may have failed. Review the work that was completed."
+- - Still require substantial output from implementer roles
+- - Added note in review task: "Some subtasks ma...
 ## Decisions
 
 ### 2026-03-23
@@ -274,6 +291,21 @@ When a session context has file-creation tools disabled (e.g., sandbox restricti
 - I'll implement all P0, P1 issues, and cleanup items systematically.
 - Now I'll implement all the fixes.
 - I'll add a message count tracker to the PulseCollector.
+### 2026-03-23
+
+- I'll fix these three pipeline reliability bugs.
+- Now I'll implement the three fixes.
+- For now, I'll implement Bug 2 by checking the agent role.
+- For now, I'll implement the fix by adding an optional callback to check agent roles:
+- ✅ Continue to review phase with partial subtask completion instead of aborting
+### 2026-03-23
+
+- - Makes both `isValidRoutingResponse()` and `parseRoutingDecision()` resilient to markdown formatting
+- - Updated `isValidRoutingResponse()` and `parseRoutingDecision()` to use resilient parsing
+### 2026-03-23
+
+- - Makes both `isValidRoutingResponse()` and `parseRoutingDecision()` resilient to markdown formatting
+- - Updated `isValidRoutingResponse()` and `parseRoutingDecision()` to use resilient parsing
 ## Patterns
 
 ### 2026-03-23
@@ -295,6 +327,16 @@ When a session context has file-creation tools disabled (e.g., sandbox restricti
 - Now let me look at the tools registration to understand the tool hiding pattern:
 - Let me check if there are any conditional tool registration patterns:
 - Let me continue looking for where tools are registered and see if there are any conditional patterns:
+### 2026-03-23
+
+- Problem: McManus said "fixed URI builder" but actual code still had old pattern. No verification that claimed changes exist.
+- 1. **Bug 4**: Ensure quality gates (understanding, build verification) are never skipped regardless of git/commit flags
+- Let me try a different approach - creating a new test file for bugs 4 and 5:
+### 2026-03-23
+
+- Problem: McManus said "fixed URI builder" but actual code still had old pattern. No verification that claimed changes exist.
+- 1. **Bug 4**: Ensure quality gates (understanding, build verification) are never skipped regardless of git/commit flags
+- Let me try a different approach - creating a new test file for bugs 4 and 5:
 ## Issues
 
 ### 2026-03-23
@@ -316,6 +358,25 @@ When a session context has file-creation tools disabled (e.g., sandbox restricti
 - 5. Delete repo root artifact files (SAGE_PROPOSALS_PRIORITY_SUMMARY.md, MCP_TOOL_VISIBILITY_IMPLEMENTATION.md, server.ts.backup, DASHBOARD-FIX-REPORT.md, PHASE1-VERIFICATION.md, squad-ben-fix-report.m
 - Also clean up the blocking issues from Strausz's review:
 - - Delete repo ro...
+### 2026-03-23
+
+- Now let me check the test file to understand the failures better:
+- Let me start with Bug 1 - making the Coordinator gate more resilient:
+- Now let me look at the agent roles to determine which agents are planners/orchestrators for Bug 2:
+- Now let me implement Bug 3 - making the pipeline resilient to partial subtask failure.
+- Now let me add retry logic to the Coordinator gate as mentioned in Bug 1.
+### 2026-03-23
+
+- Fix the three pipeline reliability bugs that caused the performance test to fail:
+- 3. Make the pipeline resilient to partial subtask failure — if some subtasks complete but one fails, continue to the review phase with the completed work instead of killing the entire pipeline.
+- After fixing, rebuild with `cd packages/squad-sdk && npx tsc --build --force`. Then run the tests to make sure nothing broke.
+- Performance test of the SDK pipeline just failed on a real project (APIM Portal Named V...
+### 2026-03-23
+
+- Fix the three pipeline reliability bugs that caused the performance test to fail:
+- 3. Make the pipeline resilient to partial subtask failure — if some subtasks complete but one fails, continue to the review phase with the completed work instead of killing the entire pipeline.
+- After fixing, rebuild with `cd packages/squad-sdk && npx tsc --build --force`. Then run the tests to make sure nothing broke.
+- Performance test of the SDK pipeline just failed on a real project (APIM Portal Named V...
 ## References
 
 ### 2026-03-23
@@ -328,3 +389,29 @@ Session artifacts:
 Session artifacts:
 - When done, emit squad_pulse with phase "done" listing the files you created or modified.
 - - Auto-pulse format: phase="analyzing", status="ok", note="auto-generated"
+### 2026-03-23
+
+Session artifacts:
+- When done, emit squad_pulse with phase "done" listing the files you created or modified.
+- Good! The retry logic is already in place at the runner level (lines 105-168). The `DEFAULT_RETRIES` is set to 1, which means there's already one retry. The routing parser functions are just validator
+- Added `extractJSON()` helper function that:
+- - Added optional `isPlannerRole` callback to `PhaseGeneratorOptions` interface
+- - `packages/squad-sdk/src/pipeline/types.ts` - Added `continueOnPartialFailure` flag to `PhaseDefinition`
+- - **New tests:** Added 13 comprehensive tests covering all three bug fixes
+- - SDK rebuilt successfully with `npx tsc --build --force`
+- - Added `extractJSON()` helper that extracts JSON from:
+- - Added optional `isPlannerRole` callback to `PhaseGeneratorOptions` interface
+- - `packages/squad-sdk/src/pipeline/types.ts` (added flag)
+### 2026-03-23
+
+Session artifacts:
+- When done, emit squad_pulse with phase "done" listing the files you created or modified.
+- Good! The retry logic is already in place at the runner level (lines 105-168). The `DEFAULT_RETRIES` is set to 1, which means there's already one retry. The routing parser functions are just validator
+- Added `extractJSON()` helper function that:
+- - Added optional `isPlannerRole` callback to `PhaseGeneratorOptions` interface
+- - `packages/squad-sdk/src/pipeline/types.ts` - Added `continueOnPartialFailure` flag to `PhaseDefinition`
+- - **New tests:** Added 13 comprehensive tests covering all three bug fixes
+- - SDK rebuilt successfully with `npx tsc --build --force`
+- - Added `extractJSON()` helper that extracts JSON from:
+- - Added optional `isPlannerRole` callback to `PhaseGeneratorOptions` interface
+- - `packages/squad-sdk/src/pipeline/types.ts` (added flag)

@@ -21,9 +21,53 @@ import { PipelineRunner, parseRoutingDecision, generateImplPhases, isValidRoutin
 import { analyzeRun, formatAnalysisReport, type SessionSnapshot } from './analyze-run.js';
 import { triggerAutoSageAnalysis } from './auto-sage.js';
 import { resolveDashboardPort, persistPort, clearPersistedPort } from './dashboard-port.js';
+import { parseCharterMetadata } from '../config/agent-source.js';
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+
+/**
+ * Default set of tools exposed on the MCP surface.
+ * These are user-facing tools that Copilot can discover and invoke.
+ */
+export const DEFAULT_PUBLIC_TOOLS = new Set([
+  'squad_run',
+  'squad_ask',
+  'squad_respond',
+  'squad_wait',
+  'squad_status',
+  'squad_cancel',
+  'squad_analyze_run',
+] as const);
+
+/**
+ * Internal tools available to agents but not exposed via MCP.
+ * These are used for agent-to-agent coordination inside sessions.
+ */
+export const INTERNAL_TOOLS = new Set([
+  'squad_dispatch',
+  'squad_send',
+  'squad_read_session',
+  'squad_close_session',
+  'squad_pulse',
+  'squad_roster',
+  'squad_list_agents',
+  'squad_monitor',
+  'squad_memory',
+  'squad_decide',
+  'squad_intent',
+  'squad_wait_for_idle',
+] as const);
+
+/**
+ * All available tools (public + internal).
+ * Use this to expose all tools for testing or advanced scenarios.
+ */
+export const ALL_TOOLS = new Set([
+  ...DEFAULT_PUBLIC_TOOLS,
+  ...INTERNAL_TOOLS,
+] as const);
+
 
 export interface SquadMCPServerOptions {
   /** Squad root directory */
@@ -34,6 +78,95 @@ export interface SquadMCPServerOptions {
   serverName?: string;
   /** Server version for MCP */
   serverVersion?: string;
+  /**
+   * Override which tools are exposed on the MCP surface for Copilot discovery.
+   * By default, only user-facing tools are public (squad_run, squad_ask, etc.).
+   * Internal coordination tools (squad_dispatch, squad_send, etc.) remain available
+   * to agents inside sessions but are not exposed via MCP.
+   * 
+   * Set this to customize tool visibility for specific deployment scenarios.
+   */
+  publicTools?: Set<string>;
+}
+
+/**
+ * Cache for agent role metadata.
+ * Key: agentName, Value: { role, isPlannerRole, isDocWriterRole }
+ */
+const agentRoleCache = new Map<string, { role: string; isPlannerRole: boolean; isDocWriterRole: boolean }>();
+
+/**
+ * Helper to detect if an agent is a planner/lead/orchestrator.
+ * These roles produce planning output rather than code.
+ */
+function createIsPlannerRoleDetector(squadRoot: string): (agentName: string) => boolean {
+  return (agentName: string) => {
+    if (agentRoleCache.has(agentName)) {
+      return agentRoleCache.get(agentName)!.isPlannerRole;
+    }
+    
+    const charterPath = path.join(squadRoot, '.squad', 'agents', agentName, 'charter.md');
+    try {
+      const content = fs.readFileSync(charterPath, 'utf-8');
+      const metadata = parseCharterMetadata(content);
+      const role = metadata.role?.toLowerCase() ?? '';
+      
+      // Planner/lead/orchestrator roles: produce planning output
+      const isPlannerRole = role.includes('lead') || 
+                           role.includes('planner') || 
+                           role.includes('orchestrator') ||
+                           role.includes('coordinator') ||
+                           role.includes('architect');
+      
+      // Doc writer roles: produce documentation, not code
+      const isDocWriterRole = role.includes('devrel') ||
+                             role.includes('technical writer') ||
+                             role.includes('documentation') ||
+                             role.includes('docs');
+      
+      agentRoleCache.set(agentName, { role, isPlannerRole, isDocWriterRole });
+      return isPlannerRole;
+    } catch {
+      return false; // Charter not found or unreadable - assume code implementer
+    }
+  };
+}
+
+/**
+ * Helper to detect if an agent is a doc writer.
+ * These roles produce documentation rather than code.
+ */
+function createIsDocWriterRoleDetector(squadRoot: string): (agentName: string) => boolean {
+  return (agentName: string) => {
+    if (agentRoleCache.has(agentName)) {
+      return agentRoleCache.get(agentName)!.isDocWriterRole;
+    }
+    
+    const charterPath = path.join(squadRoot, '.squad', 'agents', agentName, 'charter.md');
+    try {
+      const content = fs.readFileSync(charterPath, 'utf-8');
+      const metadata = parseCharterMetadata(content);
+      const role = metadata.role?.toLowerCase() ?? '';
+      
+      // Planner/lead/orchestrator roles: produce planning output
+      const isPlannerRole = role.includes('lead') || 
+                           role.includes('planner') || 
+                           role.includes('orchestrator') ||
+                           role.includes('coordinator') ||
+                           role.includes('architect');
+      
+      // Doc writer roles: produce documentation, not code
+      const isDocWriterRole = role.includes('devrel') ||
+                             role.includes('technical writer') ||
+                             role.includes('documentation') ||
+                             role.includes('docs');
+      
+      agentRoleCache.set(agentName, { role, isPlannerRole, isDocWriterRole });
+      return isDocWriterRole;
+    } catch {
+      return false; // Charter not found or unreadable - assume code implementer
+    }
+  };
 }
 
 export async function createSquadMCPServer(options: SquadMCPServerOptions): Promise<void> {
@@ -104,22 +237,33 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   //   - squad_intent: Intent graph state management
   //   - squad_wait_for_idle: Internal coordination primitive
   //
-  // Public tools are registered on the MCP surface for Copilot discovery.
-  // Internal tools are defined but not registered - they remain available to agents
-  // inside sessions through the SquadTools interface in src/tools/index.ts.
+  // IMPLEMENTATION PATTERN:
+  // -----------------------
+  // All tools are defined using registerTool(), which checks the publicTools set.
+  // - If a tool is in publicTools → registered with MCP (Copilot can discover it)
+  // - If NOT in publicTools → handler exists but not exposed on MCP surface
+  //
+  // This replaces the old if(false) pattern, which was dead code vulnerable to
+  // refactoring errors. The new pattern is configuration-driven and type-safe.
+  //
+  // To expose internal tools (e.g., for testing or advanced scenarios), pass
+  // a custom publicTools Set via SquadMCPServerOptions.publicTools.
 
   // Define which tools are exposed on the MCP surface
-  const publicTools = new Set([
-    'squad_run',
-    'squad_ask',
-    'squad_respond',
-    'squad_wait',
-    'squad_status',
-    'squad_cancel',
-    'squad_analyze_run',
-  ]);
+  // Can be overridden via options.publicTools for custom deployments
+  const publicTools = options.publicTools ?? DEFAULT_PUBLIC_TOOLS;
 
-  // Helper to conditionally register tools based on visibility
+  /**
+   * Helper to conditionally register tools based on visibility configuration.
+   * 
+   * All tools are defined via this function. If a tool's name is in the publicTools
+   * set, it gets registered with the MCP server (making it discoverable by Copilot).
+   * If not in the set, the handler is defined but not exposed - it remains available
+   * to agents inside sessions via the SquadTools interface.
+   * 
+   * This pattern ensures all tools have consistent implementations while allowing
+   * flexible visibility control without dead code branches.
+   */
   const registerTool = (
     schema: {
       name: string;
@@ -155,6 +299,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
     },
     async (args) => {
       await ensureStarted();
+      trackAgentMessage(args.agentName);
       const result = await server.dispatch(args.agentName, args.message, args.context);
       const resolvedNote = result.agentName !== args.agentName
         ? ` (resolved "${args.agentName}" → "${result.agentName}")`
@@ -401,6 +546,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       const mgr = server.getSessionManager();
       if (!mgr) throw new Error('Server not ready');
 
+      trackAgentMessage(args.agentName);
       try {
         const response = await mgr.sendFollowUp(args.agentName, args.message);
         if (response) {
@@ -602,6 +748,20 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
     waitResolvers = [];
   });
 
+  // Wire progress regression detection — log regression events for diagnostics
+  pulseCollector.setOnProgressRegression((agent, oldProgress, newProgress) => {
+    process.stderr.write(
+      `[squad-mcp] Progress regression: ${agent} went from ${oldProgress}% to ${newProgress}%\n`,
+    );
+  });
+
+  // Wire message count tracking — track dispatches per agent across the session.
+  // The PulseCollector emits a warning pulse when an agent exceeds the threshold
+  // (default: 25 messages), signaling potential infinite loops or runaway agents.
+  const trackAgentMessage = (agentName: string) => {
+    pulseCollector.trackMessage(agentName);
+  };
+
   // squad_run: Start a team run via Ben (user-facing entry point)
   registerTool(
     {
@@ -697,6 +857,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
 
       const pipelineDeps: PipelineRunnerDeps = {
         dispatch: async (agentName: string, task: string, context?: string) => {
+          trackAgentMessage(agentName);
           const result = await server.dispatch(agentName, task, context);
           // Grab the latest assistant reply captured by sendAndWait in dispatch
           const msgs = mgr.getMessages(agentName);
@@ -826,6 +987,10 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         if (!routingDecision) return;
 
         const revName = routingDecision.reviewer;
+        
+        // Create role detectors for gate validation
+        const isPlannerRole = createIsPlannerRoleDetector(options.squadRoot);
+        const isDocWriterRole = createIsDocWriterRoleDetector(options.squadRoot);
 
         const implPhases = generateImplPhases(routingDecision, {
           message: args.message,
@@ -835,12 +1000,15 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             const agentPulses = pulseCollector.getByAgent(agentName);
             return agentPulses.some(p => p.phase === 'done');
           },
+          isPlannerRole,
+          isDocWriterRole,
           timeout: 300_000,
         });
 
         const implPipelineDeps: PipelineRunnerDeps = {
           ...pipelineDeps,
           dispatch: async (agentName: string, task: string, context?: string) => {
+            trackAgentMessage(agentName);
             const result = await server.dispatch(agentName, task, context);
             // sendAndWait returns on the FIRST response turn, but agents doing
             // multi-step work (file edits, tests, builds) keep executing.

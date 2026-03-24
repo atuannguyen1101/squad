@@ -34,25 +34,73 @@ export interface PhaseGeneratorOptions {
    */
   hasDonePulse: (agentName: string) => boolean;
   /**
+   * Called to check if an agent's role is planner/lead/orchestrator.
+   * Used for gate validation. Return true if the agent produces planning output, not code.
+   */
+  isPlannerRole?: (agentName: string) => boolean;
+  /**
+   * Called to check if an agent's role is doc writer (DevRel, technical writer, etc.).
+   * Used for gate validation. Return true if the agent produces documentation, not code.
+   */
+  isDocWriterRole?: (agentName: string) => boolean;
+  /**
+   * Called to verify that claimed file changes actually exist.
+   * Used for gate validation. Returns true if file content matches agent's claims.
+   * If not provided, file verification is skipped.
+   */
+  verifyFileChanges?: (agentName: string, output: string) => Promise<boolean> | boolean;
+  /**
    * Sentinel string for tool-call placeholder responses.
    * Outputs matching this string are not considered substantial.
    */
   toolCallPlaceholder: string;
   /** Per-phase timeout in ms (default: 300_000) */
   timeout?: number;
+  /**
+   * Whether this is "throwaway work" (no git commits).
+   * Quality gates remain mandatory regardless of this flag.
+   * Only affects git operations (commit, PR, ADO creation).
+   */
+  isThrowawayWork?: boolean;
 }
 
 // ─── Parsing ────────────────────────────────────────────────────────────────
 
 /**
+ * Extract JSON from markdown code blocks or surrounding prose.
+ * Returns the extracted JSON string or null if no JSON found.
+ */
+function extractJSON(text: string): string | null {
+  // Try markdown code block first (```json ... ``` or ``` ... ```)
+  const codeBlockMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+  if (codeBlockMatch?.[1]) {
+    return codeBlockMatch[1];
+  }
+
+  // Try bare JSON object
+  const bareMatch = text.match(/\{[\s\S]*\}/);
+  if (bareMatch?.[0]) {
+    return bareMatch[0];
+  }
+
+  return null;
+}
+
+/**
  * Validate whether a Coordinator response string is a valid routing decision.
  * Accepts both single-agent and multi-subtask formats.
  * Reviewer is optional for simple tasks — implementer-only routing is valid.
+ * 
+ * Resilient parsing: extracts JSON from markdown code blocks, ignores surrounding prose.
  */
 export function isValidRoutingResponse(output: unknown): boolean {
   if (typeof output !== 'string') return false;
+  
+  const jsonStr = extractJSON(output);
+  if (!jsonStr) return false;
+
   try {
-    const parsed = JSON.parse(output.match(/\{[\s\S]*\}/)?.[0] ?? '');
+    const parsed = JSON.parse(jsonStr);
     // Single-agent format: implementer required, reviewer optional
     if (parsed.implementer) return true;
     // Multi-subtask format: subtasks required, reviewer optional
@@ -69,10 +117,14 @@ export function isValidRoutingResponse(output: unknown): boolean {
  * Parse a Coordinator response string into a typed RoutingDecision.
  * Returns null if the response is not valid.
  * Reviewer is optional — if not present or null, no review phase will be generated.
+ * 
+ * Resilient parsing: extracts JSON from markdown code blocks, ignores surrounding prose.
  */
 export function parseRoutingDecision(output: string): RoutingDecision | null {
+  const jsonStr = extractJSON(output);
+  if (!jsonStr) return null;
+
   try {
-    const jsonStr = output.match(/\{[\s\S]*\}/)?.[0] ?? '';
     const parsed = JSON.parse(jsonStr);
 
     if (Array.isArray(parsed.subtasks) && parsed.subtasks.length > 0) {
@@ -131,16 +183,52 @@ export function generateImplPhases(
         `Implement the following request:`,
         `${opts.message}${opts.contextAddendum}`,
         '',
+        'IMPORTANT QUALITY REQUIREMENTS (always mandatory):',
+        '- Read and understand all relevant sections before making changes',
+        '- Verify the build passes after your changes',
+        '- Test your changes to confirm they work',
+        '- Document your changes clearly',
+        '',
+        opts.isThrowawayWork 
+          ? '⚠️ THROWAWAY MODE: Do NOT commit to git, do NOT create PR or ADO items. This is a test/performance run.'
+          : 'After completing the work, commit your changes to git if appropriate.',
+        '',
         'Write code, add tests, and verify the build passes.',
         'Use squad_pulse to report progress at milestones.',
         'When done, emit squad_pulse with phase "done" listing the files you created or modified.',
       ].join('\n'),
       gate: {
-        validate: (o: unknown) => {
-          if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) return true;
-          return opts.hasDonePulse(implName);
+        validate: async (o: unknown) => {
+          // Check for done pulse first
+          if (opts.hasDonePulse(implName)) return true;
+          
+          // Check if this is a planner/lead/orchestrator role - accept planning output
+          const isPlanner = opts.isPlannerRole?.(implName) ?? false;
+          if (isPlanner && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
+            return true;
+          }
+          
+          // Check if this is a doc writer role - accept documentation output without code verification
+          const isDocWriter = opts.isDocWriterRole?.(implName) ?? false;
+          if (isDocWriter && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
+            return true;
+          }
+          
+          // For code implementers, require substantial output (code/files) and verify changes
+          if (!isPlanner && !isDocWriter && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
+            // Bug 5 fix: Verify file changes if agent claims changes
+            if (opts.verifyFileChanges && o.match(/(?:fixed|changed|updated|modified|created|added|wrote)\s+.+?\.(ts|js|json|md|tsx|jsx|py|go|java|cs)/i)) {
+              const verified = await opts.verifyFileChanges(implName, o);
+              if (!verified) {
+                return false; // Agent claimed changes but verification failed
+              }
+            }
+            return true;
+          }
+          
+          return false;
         },
-        description: 'Implementer must produce substantial output or emit a done pulse',
+        description: 'Implementer must produce substantial output (code, docs, or planning) or emit a done pulse. Code changes must be verified.',
       },
       timeout,
     });
@@ -158,6 +246,7 @@ export function generateImplPhases(
           'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
         ].join('\n'),
         dependsOn: ['implement'],
+        continueOnPartialFailure: false, // Single implementer - require it to succeed
         gate: {
           validate: (o: unknown) => {
             if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 20) return true;
@@ -192,16 +281,52 @@ export function generateImplPhases(
           `You are working in parallel with other agents. Use squad_scratchpad_write to coordinate shared state.`,
           `Avoid modifying files that other agents may also be editing.`,
           '',
+          'IMPORTANT QUALITY REQUIREMENTS (always mandatory):',
+          '- Read and understand all relevant sections before making changes',
+          '- Verify the build passes after your changes',
+          '- Test your changes to confirm they work',
+          '- Document your changes clearly',
+          '',
+          opts.isThrowawayWork 
+            ? '⚠️ THROWAWAY MODE: Do NOT commit to git, do NOT create PR or ADO items. This is a test/performance run.'
+            : 'After completing the work, commit your changes to git if appropriate.',
+          '',
           'Write code, add tests, and verify the build passes.',
           'Use squad_pulse to report progress at milestones.',
           'When done, emit squad_pulse with phase "done" listing the files you created or modified.',
         ].join('\n'),
         gate: {
-          validate: ((agentName: string) => (o: unknown) => {
-            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) return true;
-            return opts.hasDonePulse(agentName);
+          validate: ((agentName: string) => async (o: unknown) => {
+            // Check for done pulse first
+            if (opts.hasDonePulse(agentName)) return true;
+            
+            // Check if this is a planner/lead/orchestrator role - accept planning output
+            const isPlanner = opts.isPlannerRole?.(agentName) ?? false;
+            if (isPlanner && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
+              return true;
+            }
+            
+            // Check if this is a doc writer role - accept documentation output without code verification
+            const isDocWriter = opts.isDocWriterRole?.(agentName) ?? false;
+            if (isDocWriter && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
+              return true;
+            }
+            
+            // For code implementers, require substantial output (code/files) and verify changes
+            if (!isPlanner && !isDocWriter && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
+              // Bug 5 fix: Verify file changes if agent claims changes
+              if (opts.verifyFileChanges && o.match(/(?:fixed|changed|updated|modified|created|added|wrote)\s+.+?\.(ts|js|json|md|tsx|jsx|py|go|java|cs)/i)) {
+                const verified = await opts.verifyFileChanges(agentName, o);
+                if (!verified) {
+                  return false; // Agent claimed changes but verification failed
+                }
+              }
+              return true;
+            }
+            
+            return false;
           })(subtask.agent),
-          description: `Subtask implementer (${subtask.agent}) must produce substantial output or emit a done pulse`,
+          description: `Subtask implementer (${subtask.agent}) must produce substantial output (code, docs, or planning) or emit a done pulse. Code changes must be verified.`,
         },
         timeout,
       });
@@ -225,11 +350,13 @@ export function generateImplPhases(
           '',
           sessionReadInstructions,
           '',
+          'NOTE: Some subtasks may have failed. Review the work that was completed.',
           'Check: code quality, test coverage, pattern consistency, type safety.',
           'IMPORTANT: Check for file conflicts between parallel agents — look for overlapping edits to the same files.',
           'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
         ].join('\n'),
         dependsOn: implementPhaseIds,
+        continueOnPartialFailure: true, // Continue review even if some subtasks failed
         gate: {
           validate: (o: unknown) => {
             if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 20) return true;

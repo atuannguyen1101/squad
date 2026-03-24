@@ -9,7 +9,7 @@
 export type PhaseStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
 
 export interface PhaseGate<T = unknown> {
-  validate: (output: T) => boolean;
+  validate: (output: T) => boolean | Promise<boolean>;
   description: string;
 }
 
@@ -23,6 +23,11 @@ export interface PhaseDefinition<TOutput = unknown> {
   timeout?: number;
   retries?: number;
   context?: Record<string, unknown>;
+  /**
+   * If true, this phase will run even if some (but not all) dependencies failed.
+   * Useful for review phases that should see partial work.
+   */
+  continueOnPartialFailure?: boolean;
 }
 
 export interface PhaseResult<T = unknown> {

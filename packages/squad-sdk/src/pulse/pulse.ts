@@ -305,5 +305,22 @@ export class PulseCollector {
   clear(): void {
     this.pulses = [];
     this.userQueue = [];
+    this.messageCountsByAgent.clear();
+    this.messageCountWarningsEmitted.clear();
+  }
+
+  /**
+   * Set the message count warning threshold.
+   * When an agent exceeds this many messages, a warning pulse is emitted.
+   */
+  setMessageCountWarningThreshold(threshold: number): void {
+    this.messageCountWarningThreshold = threshold;
+  }
+
+  /**
+   * Get the current message count for an agent.
+   */
+  getMessageCount(agentName: string): number {
+    return this.messageCountsByAgent.get(agentName) ?? 0;
   }
 }

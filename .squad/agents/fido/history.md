@@ -136,6 +136,23 @@ Pattern: Quality tooling gap identified. ESLint 9 modernization + async/promise 
 ### 2026-03-23
 
 - - **Proper artifact reporting** — explicitly noted "No files created or modified" (read-only verification)
+### 2026-03-23
+
+- I've reviewed EECOM's implementation of the pipeline reliability fixes.. ### **Code Quality: EXCELLENT**
+### 2026-03-23
+
+- - Implementers: Still require substantial output or done pulse
+- - **UX**: Added note in review task: "Some subtasks may have failed. Review the work that was completed."
+- - **Bug 3**: 3 tests covering continueOnPartialFailure flag, review phase notes, single vs. multi-subtask behavior
+- ### **Architecture Notes:**
+- - Implementers: Still require substantial output or done pulse
+### 2026-03-23
+
+- - Implementers: Still require substantial output or done pulse
+- - **UX**: Added note in review task: "Some subtasks may have failed. Review the work that was completed."
+- - **Bug 3**: 3 tests covering continueOnPartialFailure flag, review phase notes, single vs. multi-subtask behavior
+- ### **Architecture Notes:**
+- - Implementers: Still require substantial output or done pulse
 ## Issues
 
 ### 2026-03-23
@@ -148,6 +165,25 @@ Pattern: Quality tooling gap identified. ESLint 9 modernization + async/promise 
 - - **Pre-existing gaps documented:** 8 CLI type errors correctly attributed to incomplete cross-squad/mcp/serve modules
 - - **SDK: Zero errors** — clean type-check
 - - **CLI: 8 pre-existing errors** — properly documented as not regression (missing SDK exports for cr...
+### 2026-03-23
+
+- **Bug 1 - Coordinator Gate Resilience** ✅
+- **Bug 2 - Planner Role Gates** ✅
+- **Bug 3 - Partial Failure Resilience** ✅
+- **Bug 1**: 6 tests covering markdown wrapped JSON, prose-surrounded JSON, multi-subtask format, invalid JSON rejection
+- **Bug 2**: 4 tests covering planner output acceptance, implementer validation, code output acceptance
+### 2026-03-23
+
+- Review the implementation for: Fix the three pipeline reliability bugs that caused the performance test to fail:
+- 3. Make the pipeline resilient to partial subtask failure — if some subtasks complete but one fails, continue to the review phase with the completed work instead of killing the entire pipeline.
+- After fixing, rebuild with `cd packages/squad-sdk && npx tsc --build --force`. Then run the tests to make sure nothing broke.
+- Emit squad_pulse with phase "done" if approved or "block...
+### 2026-03-23
+
+- Review the implementation for: Fix the three pipeline reliability bugs that caused the performance test to fail:
+- 3. Make the pipeline resilient to partial subtask failure — if some subtasks complete but one fails, continue to the review phase with the completed work instead of killing the entire pipeline.
+- After fixing, rebuild with `cd packages/squad-sdk && npx tsc --build --force`. Then run the tests to make sure nothing broke.
+- Emit squad_pulse with phase "done" if approved or "block...
 ## Patterns
 
 ### 2026-03-23
@@ -161,7 +197,29 @@ Pattern: Quality tooling gap identified. ESLint 9 modernization + async/promise 
 - ### ✅ **Pattern Consistency: STRONG**
 - - **Pattern consistency:** Proper squad_pulse usage, clear artifact reporting
 - - **Pattern consistency:** Proper squad_pulse usage, clear artifact reporting
+### 2026-03-23
+
+- **Pattern**: Uses closure pattern for subtask gates to capture agent name - elegant solution
+- ### **Pattern Consistency: EXCELLENT**
+- Optional callback pattern properly typed with `?:`
+- **Pattern**: Uses closure pattern for subtask gates to capture agent name - elegant solution
+- ### **Pattern Consistency: EXCELLENT**
+### 2026-03-23
+
+- Check: code quality, test coverage, pattern consistency, type safety.
+- Perfect! TypeScript compilation passes with no errors. Let me review the code patterns for consistency:
+- - **Pattern**: Clean functional approach, proper null handling, regex patterns are correct
+- - **Pattern**: Uses closure pattern for subtask gates to capture agent name - elegant solution
+- ### **Pattern Consistency: EXCELLENT**
+### 2026-03-23
+
+- Check: code quality, test coverage, pattern consistency, type safety.
+- Perfect! TypeScript compilation passes with no errors. Let me review the code patterns for consistency:
+- - **Pattern**: Clean functional approach, proper null handling, regex patterns are correct
+- - **Pattern**: Uses closure pattern for subtask gates to capture agent name - elegant solution
+- ### **Pattern Consistency: EXCELLENT**
 ## Decisions
+
 ### 2026-03-23
 
 - Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.
@@ -169,11 +227,45 @@ Pattern: Quality tooling gap identified. ESLint 9 modernization + async/promise 
 - - ✅ Dashboard visibility confirmed (pulse emissions visible)
 - ## ✅ **APPROVED — Smoke Test Implementation**
 - 3. ✅ Confirmed dashboard visibility (pulse telemetry working)
+### 2026-03-23
 
+- Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.
+- **Recommendation: APPROVED FOR MERGE** 🚀
+- **Recommendation: APPROVED FOR MERGE** 🚀
+### 2026-03-23
+
+- Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.
+- **Recommendation: APPROVED FOR MERGE** 🚀
+- **Recommendation: APPROVED FOR MERGE** 🚀
 ## References
+
 ### 2026-03-23
 
 Session artifacts:
 - Use squad_read_session to read fenster's session and see what was built.
 - - **No new tests needed** — smoke test was communication-only, no new functionality added
 - - **Proper artifact reporting** — explicitly noted "No files created or modified" (read-only verification)
+### 2026-03-23
+
+Session artifacts:
+- Use squad_read_session to read eecom's session and see what was built.
+- - **Implementation**: Added optional `isPlannerRole` callback to `PhaseGeneratorOptions`
+- - **Implementation**: Added `continueOnPartialFailure` field to `PhaseDefinition` type
+- - **UX**: Added note in review task: "Some subtasks may have failed. Review the work that was completed."
+- - SDK rebuilt successfully with `npx tsc --build --force`
+- - **Implementation**: Added optional `isPlannerRole` callback to `PhaseGeneratorOptions`
+- - **Implementation**: Added `continueOnPartialFailure` field to `PhaseDefinition` type
+- - **UX**: Added note in review task: "Some subtasks may have failed. Review the work that was completed."
+- - SDK rebuilt successfully with `npx tsc --build --force`
+### 2026-03-23
+
+Session artifacts:
+- Use squad_read_session to read eecom's session and see what was built.
+- - **Implementation**: Added optional `isPlannerRole` callback to `PhaseGeneratorOptions`
+- - **Implementation**: Added `continueOnPartialFailure` field to `PhaseDefinition` type
+- - **UX**: Added note in review task: "Some subtasks may have failed. Review the work that was completed."
+- - SDK rebuilt successfully with `npx tsc --build --force`
+- - **Implementation**: Added optional `isPlannerRole` callback to `PhaseGeneratorOptions`
+- - **Implementation**: Added `continueOnPartialFailure` field to `PhaseDefinition` type
+- - **UX**: Added note in review task: "Some subtasks may have failed. Review the work that was completed."
+- - SDK rebuilt successfully with `npx tsc --build --force`

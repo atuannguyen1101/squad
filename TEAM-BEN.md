@@ -117,6 +117,34 @@ Sage (SDK built-in) — post-run analysis via squad_analyze_run
 - `/api/status`, `/api/dispatch`, `/api/sessions/:name`, `/api/send`, `/api/close`
 - URL shown by `squad_status`
 
+### Performance Test Mode
+
+When users specify "throwaway work" or "no git commits", the pipeline operates in Performance Test Mode with the following rules:
+
+**Key Points:**
+
+1. **Quality gates must NEVER be skipped** — Understanding verification, build verification, and fix verification remain fully active and mandatory. All work must meet production quality standards.
+
+2. **ONLY git operations are skippable** — No commits, no branches, no pushes. Git operations are bypassed entirely in this mode.
+
+3. **Work quality standards remain identical to production work** — Code quality, testing requirements, validation gates, and verification steps are unchanged. "Throwaway" means the work won't be committed to version control, NOT that quality can be reduced.
+
+**What Remains Required:**
+- Understanding sections: agents must read and understand relevant code before making changes
+- Build verification: all code changes must pass build checks
+- Fix verification: agents must verify their fixes actually resolve the reported issue
+- Quality gates: code review, test validation, and all other quality checks remain active
+
+**What Is Skippable:**
+- Git operations: commit, push, branch creation
+- Pull request creation
+- Azure DevOps work item creation
+- Other external integration workflows
+
+**Rationale:** Quality gates ensure pipeline reliability even during test scenarios. Pipeline improvements (coordinator JSON parsing, planner/lead gate validation, partial subtask failure handling) require consistent gate execution to validate fixes. Skipping quality checks would prevent proper testing and risk introducing regressions.
+
+**Detection:** Pipeline recognizes throwaway mode via user intent keywords ("throwaway", "no commits", "no git", "test only", "verification run"). When detected, git and integration operations are bypassed while maintaining all quality validation steps.
+
 ## What's Built
 
 | Component | Files | Status |

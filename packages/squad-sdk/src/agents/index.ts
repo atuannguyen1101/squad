@@ -99,6 +99,16 @@ export {
   type BuiltInActor,
 } from './built-in-actors.js';
 
+// --- Instruction Injection ---
+export {
+  discoverInstructions,
+  discoverSkills,
+  matchInstructions,
+  buildInstructionsSection,
+  injectInstructions,
+  type InstructionFile,
+} from './instruction-injector.js';
+
 // --- Charter Types ---
 
 export interface AgentCharter {
