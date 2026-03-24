@@ -422,3 +422,18 @@ Session artifacts:
 - - Added `extractJSON()` helper that extracts JSON from:
 - - Added optional `isPlannerRole` callback to `PhaseGeneratorOptions` interface
 - - `packages/squad-sdk/src/pipeline/types.ts` (added flag)
+
+### Personal Squad Init via npx (#576) (2026-03-23)
+
+**Context:** `init --global` (used via npx to set up personal squad) created a full `.squad/` structure at `~/.config/squad/` but never created the `personal-squad/` subdirectory. `resolvePersonalSquadDir()` looks for `personal-squad/`, so subsequent repo-level `init` couldn't discover the user's personal agents.
+
+**Root cause:** Two separate concepts - `init --global` scaffolds a full squad, `personal init` creates `personal-squad/`. The `--global` flag never bridged between them.
+
+**Fix:**
+1. `resolution.ts` - Added `ensurePersonalSquadDir()` idempotent helper to SDK.
+2. `cli-entry.ts` - `init --global` now suppresses workflows and passes `isGlobal` flag.
+3. `init.ts` - After global init, calls `ensurePersonalSquadDir()`. After repo init, detects personal squad.
+4. `personal.ts` - Refactored to reuse `ensurePersonalSquadDir()`.
+5. `resolution.test.ts` - Added 3 tests.
+
+**Pattern:** `resolveGlobalSquadPath()` returns the container; `ensurePersonalSquadDir()` creates the subdirectory the rest of the system looks for.
