@@ -30,6 +30,9 @@ export interface PulseFilter {
 export function createPulse(fields: Omit<Pulse, 'timestamp'>): Pulse {
   return {
     ...fields,
+    blockers: Array.isArray(fields.blockers) ? fields.blockers : [],
+    questionsForUser: Array.isArray(fields.questionsForUser) ? fields.questionsForUser : [],
+    artifacts: Array.isArray(fields.artifacts) ? fields.artifacts : [],
     timestamp: new Date().toISOString(),
   };
 }
@@ -39,13 +42,15 @@ export function createPulse(fields: Omit<Pulse, 'timestamp'>): Pulse {
  * User-relevant: has questions, has blockers, is done, or is an error.
  */
 export function filterPulseForUser(pulse: Pulse): PulseFilter {
-  if (pulse.questionsForUser.length > 0) {
+  const questions = Array.isArray(pulse.questionsForUser) ? pulse.questionsForUser : [];
+  const blockers = Array.isArray(pulse.blockers) ? pulse.blockers : [];
+  if (questions.length > 0) {
     return { userRelevant: true, reason: 'has questions for user' };
   }
   if (pulse.status === 'error') {
     return { userRelevant: true, reason: 'error reported' };
   }
-  if (pulse.blockers.length > 0) {
+  if (blockers.length > 0) {
     return { userRelevant: true, reason: 'blocked' };
   }
   if (pulse.phase === 'done') {
@@ -61,14 +66,17 @@ export function formatPulseForUser(pulse: Pulse): string {
   const lines: string[] = [];
   lines.push(`[${pulse.agent}] ${pulse.phase} (${pulse.progressPct}%) — ${pulse.summary}`);
 
-  if (pulse.blockers.length > 0) {
-    lines.push(`Blocked: ${pulse.blockers.join('; ')}`);
+  if (pulse.blockers && pulse.blockers.length > 0) {
+    const blockerList = Array.isArray(pulse.blockers) ? pulse.blockers : [String(pulse.blockers)];
+    lines.push(`Blocked: ${blockerList.join('; ')}`);
   }
-  if (pulse.questionsForUser.length > 0) {
-    lines.push(`Questions: ${pulse.questionsForUser.join('; ')}`);
+  if (pulse.questionsForUser && pulse.questionsForUser.length > 0) {
+    const questionList = Array.isArray(pulse.questionsForUser) ? pulse.questionsForUser : [String(pulse.questionsForUser)];
+    lines.push(`Questions: ${questionList.join('; ')}`);
   }
-  if (pulse.artifacts.length > 0) {
-    lines.push(`Artifacts: ${pulse.artifacts.join(', ')}`);
+  if (pulse.artifacts && pulse.artifacts.length > 0) {
+    const artifactList = Array.isArray(pulse.artifacts) ? pulse.artifacts : [String(pulse.artifacts)];
+    lines.push(`Artifacts: ${artifactList.join(', ')}`);
   }
   if (pulse.nextStep) {
     lines.push(`Next: ${pulse.nextStep}`);
