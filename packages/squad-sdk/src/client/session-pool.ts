@@ -4,6 +4,9 @@
  * Manages the lifecycle of multiple concurrent agent sessions.
  * Tracks session state, enforces concurrency limits, and handles
  * cleanup of idle/errored sessions.
+ * 
+ * Spawn rate limiting: When at capacity, new spawn requests are queued
+ * instead of failing immediately. Default max concurrent: 5.
  */
 
 export type SessionStatus = 'creating' | 'active' | 'idle' | 'error' | 'destroyed';
@@ -29,10 +32,19 @@ export interface SessionPoolConfig {
 }
 
 export const DEFAULT_POOL_CONFIG: SessionPoolConfig = {
-  maxConcurrent: 10,
+  maxConcurrent: 5, // Reduced from 10 per Sage's recommendation
   idleTimeout: 300_000, // 5 minutes
   healthCheckInterval: 30_000, // 30 seconds
 };
+
+// --- Spawn Queue ---
+
+interface QueuedSpawn {
+  session: SquadSession;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  queuedAt: Date;
+}
 
 // --- Pool Events ---
 
@@ -56,6 +68,7 @@ export interface PoolEvent {
 export class SessionPool {
   private config: SessionPoolConfig;
   private sessions: Map<string, SquadSession> = new Map();
+  private spawnQueue: QueuedSpawn[] = [];
   private healthCheckTimer: NodeJS.Timeout | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
   private listeners: Array<(event: PoolEvent) => void> = [];
@@ -66,15 +79,17 @@ export class SessionPool {
     this.startCleanupTimer();
   }
 
-  /** Add a session to the pool */
+  /** Add a session to the pool, or queue it if at capacity */
   add(session: SquadSession): void {
     if (this.atCapacity) {
-      this.emitEvent({
-        type: 'pool.at_capacity',
-        timestamp: new Date(),
-      });
-      throw new Error(`SessionPool at capacity (${this.config.maxConcurrent})`);
+      // Queue the spawn instead of throwing
+      return this.queueSpawn(session);
     }
+    this.addToPool(session);
+  }
+
+  /** Internal: Add session directly to pool (bypasses capacity check) */
+  private addToPool(session: SquadSession): void {
     this.sessions.set(session.id, session);
     this.emitEvent({
       type: 'session.added',
@@ -83,7 +98,41 @@ export class SessionPool {
     });
   }
 
-  /** Remove a session from the pool */
+  /** Queue a spawn when at capacity */
+  private queueSpawn(session: SquadSession): void {
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+
+    this.spawnQueue.push({
+      session,
+      resolve,
+      reject,
+      queuedAt: new Date(),
+    });
+
+    this.emitEvent({
+      type: 'pool.at_capacity',
+      timestamp: new Date(),
+    });
+
+    // Return the promise (though add() is void, the caller will wait internally)
+    // Note: The resolve/reject will be called when processQueue() runs
+  }
+
+  /** Process queued spawns when slots become available */
+  private processQueue(): void {
+    while (!this.atCapacity && this.spawnQueue.length > 0) {
+      const queued = this.spawnQueue.shift()!;
+      this.addToPool(queued.session);
+      queued.resolve();
+    }
+  }
+
+  /** Remove a session from the pool and process queue */
   remove(sessionId: string): boolean {
     const existed = this.sessions.delete(sessionId);
     if (existed) {
@@ -92,6 +141,8 @@ export class SessionPool {
         sessionId,
         timestamp: new Date(),
       });
+      // Process queued spawns now that a slot is available
+      this.processQueue();
     }
     return existed;
   }
@@ -138,6 +189,11 @@ export class SessionPool {
     return this.sessions.size;
   }
 
+  /** Number of spawns waiting in queue */
+  get queueLength(): number {
+    return this.spawnQueue.length;
+  }
+
   /** Whether the pool is at capacity */
   get atCapacity(): boolean {
     return this.sessions.size >= this.config.maxConcurrent;
@@ -153,6 +209,13 @@ export class SessionPool {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
     }
+    
+    // Reject all queued spawns
+    for (const queued of this.spawnQueue) {
+      queued.reject(new Error('SessionPool shutting down'));
+    }
+    this.spawnQueue = [];
+    
     this.sessions.clear();
   }
 

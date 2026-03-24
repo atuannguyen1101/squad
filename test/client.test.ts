@@ -55,7 +55,7 @@ describe('SessionPool', () => {
   });
 
   it('should report default config values', () => {
-    expect(DEFAULT_POOL_CONFIG.maxConcurrent).toBe(10);
+    expect(DEFAULT_POOL_CONFIG.maxConcurrent).toBe(5);
     expect(DEFAULT_POOL_CONFIG.idleTimeout).toBe(300_000);
   });
 });
