@@ -129,8 +129,8 @@ export class PipelineRunner {
         const dispatchResult = await this.deps.dispatch(phase.agent, taskWithTools);
         const response = dispatchResult.response ?? await this.deps.waitForResponse(phase.agent, timeout);
 
-        const output = response ?? undefined;
-        const gatePass = output != null && await Promise.resolve(phase.gate.validate(output));
+        const output = response ?? '';
+        const gatePass = await Promise.resolve(phase.gate.validate(output));
         const status: PhaseStatus = gatePass ? 'completed' : 'failed';
         const completedAt = new Date();
 

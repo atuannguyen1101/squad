@@ -73,13 +73,24 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, any>; 
       for (let j = i + 1; j < endIndex && lines[j]?.trim().startsWith('-'); j++) {
         const lineContent = lines[j];
         if (!lineContent) continue;
-        const item = lineContent.trim().substring(1).trim();
+        let item = lineContent.trim().substring(1).trim();
+        // Strip surrounding quotes from YAML values
+        if ((item.startsWith('"') && item.endsWith('"')) || 
+            (item.startsWith("'") && item.endsWith("'"))) {
+          item = item.substring(1, item.length - 1);
+        }
         if (item) arrayValues.push(item);
         i = j;
       }
       frontmatter[key] = arrayValues;
     } else {
-      frontmatter[key] = value;
+      // Strip surrounding quotes from scalar values
+      let cleanValue = value;
+      if ((cleanValue.startsWith('"') && cleanValue.endsWith('"')) || 
+          (cleanValue.startsWith("'") && cleanValue.endsWith("'"))) {
+        cleanValue = cleanValue.substring(1, cleanValue.length - 1);
+      }
+      frontmatter[key] = cleanValue;
     }
   }
   

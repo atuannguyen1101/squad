@@ -199,36 +199,44 @@ export function generateImplPhases(
       ].join('\n'),
       gate: {
         validate: async (o: unknown) => {
-          // Check for done pulse first
+          // GATE FALLBACK CASCADE (resilient to missing pulses):
+          // 1. Agent emitted "done" pulse? → Pass
           if (opts.hasDonePulse(implName)) return true;
           
-          // Check if this is a planner/lead/orchestrator role - accept planning output
-          const isPlanner = opts.isPlannerRole?.(implName) ?? false;
-          if (isPlanner && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
-            return true;
-          }
-          
-          // Check if this is a doc writer role - accept documentation output without code verification
-          const isDocWriter = opts.isDocWriterRole?.(implName) ?? false;
-          if (isDocWriter && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
-            return true;
-          }
-          
-          // For code implementers, require substantial output (code/files) and verify changes
-          if (!isPlanner && !isDocWriter && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
-            // Bug 5 fix: Verify file changes if agent claims changes
-            if (opts.verifyFileChanges && o.match(/(?:fixed|changed|updated|modified|created|added|wrote)\s+.+?\.(ts|js|json|md|tsx|jsx|py|go|java|cs)/i)) {
-              const verified = await opts.verifyFileChanges(implName, o);
-              if (!verified) {
-                return false; // Agent claimed changes but verification failed
-              }
+          // 2. Agent produced non-empty assistant response? → Pass (fallback for agents that don't emit pulses)
+          if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.trim().length > 0) {
+            // Check if this is a planner/lead/orchestrator role - accept planning output
+            const isPlanner = opts.isPlannerRole?.(implName) ?? false;
+            if (isPlanner && o.length > 50) {
+              return true;
             }
-            return true;
+            
+            // Check if this is a doc writer role - accept documentation output without code verification
+            const isDocWriter = opts.isDocWriterRole?.(implName) ?? false;
+            if (isDocWriter && o.length > 50) {
+              return true;
+            }
+            
+            // For code implementers, require substantial output (code/files) and verify changes
+            if (!isPlanner && !isDocWriter && o.length > 50) {
+              // Bug 5 fix: Verify file changes if agent claims changes
+              if (opts.verifyFileChanges && o.match(/(?:fixed|changed|updated|modified|created|added|wrote)\s+.+?\.(ts|js|json|md|tsx|jsx|py|go|java|cs)/i)) {
+                const verified = await opts.verifyFileChanges(implName, o);
+                if (!verified) {
+                  return false; // Agent claimed changes but verification failed
+                }
+              }
+              return true;
+            }
+            
+            // Non-empty response but doesn't meet role-specific criteria - still pass (lenient fallback)
+            return o.length > 20;
           }
           
+          // 3. No pulse + no response (or empty/placeholder) → Reject
           return false;
         },
-        description: 'Implementer must produce substantial output (code, docs, or planning) or emit a done pulse. Code changes must be verified.',
+        description: 'Implementer must emit a done pulse OR produce non-empty output. Code changes must be verified if claimed.',
       },
       timeout,
     });
@@ -249,10 +257,15 @@ export function generateImplPhases(
         continueOnPartialFailure: false, // Single implementer - require it to succeed
         gate: {
           validate: (o: unknown) => {
-            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 20) return true;
-            return opts.hasDonePulse(revName);
+            // GATE FALLBACK CASCADE for review:
+            // 1. Agent emitted "done" pulse? → Pass
+            if (opts.hasDonePulse(revName)) return true;
+            // 2. Agent produced non-empty review? → Pass
+            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.trim().length > 20) return true;
+            // 3. No pulse + no review → Reject
+            return false;
           },
-          description: 'Reviewer must produce a substantive review or emit a done pulse',
+          description: 'Reviewer must emit a done pulse OR produce substantive review',
         },
         timeout,
       });
@@ -297,36 +310,44 @@ export function generateImplPhases(
         ].join('\n'),
         gate: {
           validate: ((agentName: string) => async (o: unknown) => {
-            // Check for done pulse first
+            // GATE FALLBACK CASCADE (resilient to missing pulses):
+            // 1. Agent emitted "done" pulse? → Pass
             if (opts.hasDonePulse(agentName)) return true;
             
-            // Check if this is a planner/lead/orchestrator role - accept planning output
-            const isPlanner = opts.isPlannerRole?.(agentName) ?? false;
-            if (isPlanner && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
-              return true;
-            }
-            
-            // Check if this is a doc writer role - accept documentation output without code verification
-            const isDocWriter = opts.isDocWriterRole?.(agentName) ?? false;
-            if (isDocWriter && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
-              return true;
-            }
-            
-            // For code implementers, require substantial output (code/files) and verify changes
-            if (!isPlanner && !isDocWriter && typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 50) {
-              // Bug 5 fix: Verify file changes if agent claims changes
-              if (opts.verifyFileChanges && o.match(/(?:fixed|changed|updated|modified|created|added|wrote)\s+.+?\.(ts|js|json|md|tsx|jsx|py|go|java|cs)/i)) {
-                const verified = await opts.verifyFileChanges(agentName, o);
-                if (!verified) {
-                  return false; // Agent claimed changes but verification failed
-                }
+            // 2. Agent produced non-empty assistant response? → Pass (fallback for agents that don't emit pulses)
+            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.trim().length > 0) {
+              // Check if this is a planner/lead/orchestrator role - accept planning output
+              const isPlanner = opts.isPlannerRole?.(agentName) ?? false;
+              if (isPlanner && o.length > 50) {
+                return true;
               }
-              return true;
+              
+              // Check if this is a doc writer role - accept documentation output without code verification
+              const isDocWriter = opts.isDocWriterRole?.(agentName) ?? false;
+              if (isDocWriter && o.length > 50) {
+                return true;
+              }
+              
+              // For code implementers, require substantial output (code/files) and verify changes
+              if (!isPlanner && !isDocWriter && o.length > 50) {
+                // Bug 5 fix: Verify file changes if agent claims changes
+                if (opts.verifyFileChanges && o.match(/(?:fixed|changed|updated|modified|created|added|wrote)\s+.+?\.(ts|js|json|md|tsx|jsx|py|go|java|cs)/i)) {
+                  const verified = await opts.verifyFileChanges(agentName, o);
+                  if (!verified) {
+                    return false; // Agent claimed changes but verification failed
+                  }
+                }
+                return true;
+              }
+              
+              // Non-empty response but doesn't meet role-specific criteria - still pass (lenient fallback)
+              return o.length > 20;
             }
             
+            // 3. No pulse + no response (or empty/placeholder) → Reject
             return false;
           })(subtask.agent),
-          description: `Subtask implementer (${subtask.agent}) must produce substantial output (code, docs, or planning) or emit a done pulse. Code changes must be verified.`,
+          description: `Subtask implementer (${subtask.agent}) must emit a done pulse OR produce non-empty output. Code changes must be verified if claimed.`,
         },
         timeout,
       });

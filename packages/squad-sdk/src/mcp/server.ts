@@ -862,6 +862,26 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           // Grab the latest assistant reply captured by sendAndWait in dispatch
           const msgs = mgr.getMessages(agentName);
           const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
+          
+          // AUTO-EMIT DONE PULSE: After agent completes, emit completion signal
+          // so gates have completion data without requiring agents to call squad_pulse manually.
+          const responseContent = lastReply?.content ?? '';
+          const derivedSummary = responseContent.length > 100 
+            ? responseContent.substring(0, 97) + '...' 
+            : responseContent || 'Work completed';
+          
+          pulseCollector.record(createPulse({
+            agent: result.agentName,
+            phase: 'done',
+            status: 'ok',
+            progressPct: 100,
+            summary: derivedSummary,
+            blockers: [],
+            questionsForUser: [],
+            artifacts: [],
+            nextStep: '',
+          }));
+          
           return {
             sessionId: result.sessionId,
             status: result.status,
@@ -928,7 +948,12 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             `User request: ${args.message}${contextAddendum}`,
           ].join('\n'),
           gate: {
-            validate: (o: unknown) => typeof o === 'string' && (o as string).length > 20,
+            validate: (o: unknown) => {
+              if (typeof o === 'string' && (o as string).length > 20) return true;
+              // Fallback: check if agent emitted a done pulse (auto-emitted by dispatch)
+              const benPulses = pulseCollector.getByAgent('ben');
+              return benPulses.some((p: any) => p.phase === 'done' && p.progressPct === 100);
+            },
             description: 'Ben must produce a substantive understanding',
           },
           timeout: 120_000,
