@@ -485,10 +485,21 @@ export class AgentSessionManager {
     const charterPath = path.join(this.squadRoot, '.squad', 'agents', agentName, 'charter.md');
 
     try {
-      return await this.charterCompiler.compile(charterPath);
-    } catch {
+      const charter = await this.charterCompiler.compile(charterPath);
+      console.log(`[Charter Loading] ✓ Successfully loaded charter for ${agentName}`);
+      return charter;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const errorStack = err instanceof Error ? err.stack : undefined;
+      
       const builtIn = getBuiltInActor(agentName);
       if (builtIn) {
+        console.error(`[Charter Loading] ✗ Failed to load charter for ${agentName} at ${charterPath}`);
+        console.error(`[Charter Loading]   Error: ${errorMsg}`);
+        if (errorStack) {
+          console.error(`[Charter Loading]   Stack: ${errorStack}`);
+        }
+        console.warn(`[Charter Loading] → Using built-in charter as fallback`);
         return {
           name: builtIn.name,
           displayName: builtIn.displayName,
@@ -499,6 +510,12 @@ export class AgentSessionManager {
         };
       }
 
+      console.error(`[Charter Loading] ✗ Failed to load charter for ${agentName} at ${charterPath}`);
+      console.error(`[Charter Loading]   Error: ${errorMsg}`);
+      if (errorStack) {
+        console.error(`[Charter Loading]   Stack: ${errorStack}`);
+      }
+      console.warn(`[Charter Loading] → Using generic fallback. Agent may lack squad_pulse() instrumentation.`);
       return {
         name: agentName,
         displayName: agentName,
@@ -519,72 +536,150 @@ export class AgentSessionManager {
    * @param workingFilePaths - Optional list of file paths the agent is working on (for instruction injection)
    */
   private async buildSystemPrompt(agentName: string, charter: AgentCharter, workingFilePaths?: string[]): Promise<string> {
-    const sections: string[] = [];
+    try {
+      const sections: string[] = [];
 
-    // 1. Agent identity header
-    sections.push(`# ${charter.displayName}\n`);
-    sections.push(`**Role:** ${charter.role}`);
-    if (charter.expertise.length > 0) {
-      sections.push(`**Expertise:** ${charter.expertise.join(', ')}`);
-    }
-    if (charter.style) {
-      sections.push(`**Style:** ${charter.style}`);
-    }
-    sections.push('');
-
-    // 2. Charter content
-    sections.push(charter.prompt);
-    sections.push('');
-
-    // 3. Project-specific instructions (auto-injected based on file paths)
-    if (workingFilePaths && workingFilePaths.length > 0) {
-      const instructionsSection = injectInstructions(this.squadRoot, workingFilePaths);
-      if (instructionsSection) {
-        sections.push(instructionsSection);
+      // 1. Agent identity header
+      try {
+        sections.push(`# ${charter.displayName}\n`);
+        sections.push(`**Role:** ${charter.role}`);
+        if (charter.expertise && charter.expertise.length > 0) {
+          sections.push(`**Expertise:** ${charter.expertise.join(', ')}`);
+        }
+        if (charter.style) {
+          sections.push(`**Style:** ${charter.style}`);
+        }
+        sections.push('');
+      } catch (err) {
+        console.error(`[System Prompt] ✗ Error building identity header for ${agentName}: ${err}`);
+        sections.push(`# ${agentName}\n`);
         sections.push('');
       }
+
+      // 2. Charter content
+      try {
+        if (charter.prompt) {
+          sections.push(charter.prompt);
+          sections.push('');
+        } else {
+          console.warn(`[System Prompt] ⚠ Charter for ${agentName} has no prompt content`);
+          sections.push(`You are ${agentName}, a squad agent.`);
+          sections.push('');
+        }
+      } catch (err) {
+        console.error(`[System Prompt] ✗ Error adding charter content for ${agentName}: ${err}`);
+        sections.push(`You are ${agentName}, a squad agent.`);
+        sections.push('');
+      }
+
+      // 3. Project-specific instructions (auto-injected based on file paths)
+      if (workingFilePaths && workingFilePaths.length > 0) {
+        try {
+          const instructionsSection = injectInstructions(this.squadRoot, workingFilePaths);
+          if (instructionsSection) {
+            sections.push(instructionsSection);
+            sections.push('');
+          }
+        } catch (err) {
+          console.error(`[System Prompt] ✗ Error injecting instructions for ${agentName}: ${err}`);
+          // Continue without instructions - not critical
+        }
+      }
+
+      // 4. Recent history — section-aware injection
+      //    Prioritize Learnings + Decisions (most actionable), then Patterns + Issues.
+      //    Skip raw Context section (already in charter) and References (low signal).
+      try {
+        const historyInjection = this.buildHistoryInjection(agentName);
+        if (historyInjection) {
+          sections.push('## Recent History\n');
+          sections.push(historyInjection);
+          sections.push('');
+        }
+      } catch (err) {
+        console.error(`[System Prompt] ✗ Error building history injection for ${agentName}: ${err}`);
+        // Continue without history - not critical
+      }
+
+      // 5. Team decisions
+      try {
+        const decisionsContent = this.readFileSafe(
+          path.join(this.squadRoot, '.squad', 'decisions.md'),
+        );
+        if (decisionsContent) {
+          sections.push('## Team Decisions\n');
+          sections.push(decisionsContent);
+          sections.push('');
+        }
+      } catch (err) {
+        console.error(`[System Prompt] ✗ Error reading team decisions for ${agentName}: ${err}`);
+        // Continue without decisions - not critical
+      }
+
+      // 6. Available squad tools (SDK-injected)
+      try {
+        const toolNames = this.tools.map(t => t.name);
+        const hasSDKTools = toolNames.some(n => n === 'squad_route');
+      } catch (err) {
+        console.error(`[System Prompt] ✗ Error checking squad tools for ${agentName}: ${err}`);
+      }
+
+      // 7. Squad communication tools
+      // Agents inside squad sessions have SDK tools (squad_route, squad_send, etc.)
+      // List the actual tool names they can call.
+      try {
+        sections.push('## Squad Communication\n');
+        sections.push('You can communicate with other squad members using these tools:');
+        sections.push('- `squad_route(targetAgent, task, context?)` — Send a task to another agent. Creates their session if needed.');
+        sections.push('- `squad_send(agentName, message)` — Send a message and wait for the response. Use for coordination and handoffs.');
+        sections.push('- `squad_read_session(agentName, lastN?)` — Read an agent\'s conversation history. Use to check progress or get results.');
+        sections.push('- `squad_decide(author, summary, body)` — Record a team decision to .squad/decisions/inbox/.');
+        sections.push('- `squad_memory(agent, section, content)` — Append to an agent\'s history for future sessions.');
+        sections.push('- `squad_status()` — Check session pool state.');
+        sections.push('');
+        sections.push('**Delegation pattern:** Use `squad_route` to dispatch work, `squad_read_session` to monitor progress, and `squad_send` to unblock agents or get synchronous responses.');
+        sections.push('');
+      } catch (err) {
+        console.error(`[System Prompt] ✗ Error building squad communication section for ${agentName}: ${err}`);
+        // Continue - these are standard instructions
+      }
+
+      const result = sections.join('\n');
+      
+      if (result.length < 50) {
+        console.error(`[System Prompt] ✗ Generated system prompt for ${agentName} is suspiciously short (${result.length} chars). This may indicate a problem.`);
+      } else {
+        console.log(`[System Prompt] ✓ Successfully built system prompt for ${agentName} (${result.length} chars)`);
+      }
+      
+      return result;
+    } catch (err) {
+      // Catastrophic failure - return minimal fallback prompt
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const errorStack = err instanceof Error ? err.stack : undefined;
+      
+      console.error(`[System Prompt] ✗✗✗ CRITICAL: Failed to build system prompt for ${agentName}`);
+      console.error(`[System Prompt]     Error: ${errorMsg}`);
+      if (errorStack) {
+        console.error(`[System Prompt]     Stack: ${errorStack}`);
+      }
+      console.warn(`[System Prompt] → Returning minimal fallback prompt`);
+      
+      // Return absolute minimal prompt as last resort
+      return `# ${charter?.displayName || agentName}
+
+${charter?.prompt || `You are ${agentName}, a squad agent. Your charter failed to load properly - please check the logs.`}
+
+## Squad Communication
+
+You can communicate with other squad members using these tools:
+- \`squad_route(targetAgent, task, context?)\` — Send a task to another agent
+- \`squad_send(agentName, message)\` — Send a message and wait for response
+- \`squad_read_session(agentName, lastN?)\` — Read an agent's conversation history
+- \`squad_decide(author, summary, body)\` — Record a team decision
+- \`squad_memory(agent, section, content)\` — Append to an agent's history
+- \`squad_status()\` — Check session pool state`;
     }
-
-    // 4. Recent history — section-aware injection
-    //    Prioritize Learnings + Decisions (most actionable), then Patterns + Issues.
-    //    Skip raw Context section (already in charter) and References (low signal).
-    const historyInjection = this.buildHistoryInjection(agentName);
-    if (historyInjection) {
-      sections.push('## Recent History\n');
-      sections.push(historyInjection);
-      sections.push('');
-    }
-
-    // 5. Team decisions
-    const decisionsContent = this.readFileSafe(
-      path.join(this.squadRoot, '.squad', 'decisions.md'),
-    );
-    if (decisionsContent) {
-      sections.push('## Team Decisions\n');
-      sections.push(decisionsContent);
-      sections.push('');
-    }
-
-    // 6. Available squad tools (SDK-injected)
-    const toolNames = this.tools.map(t => t.name);
-    const hasSDKTools = toolNames.some(n => n === 'squad_route');
-
-    // 7. Squad communication tools
-    // Agents inside squad sessions have SDK tools (squad_route, squad_send, etc.)
-    // List the actual tool names they can call.
-    sections.push('## Squad Communication\n');
-    sections.push('You can communicate with other squad members using these tools:');
-    sections.push('- `squad_route(targetAgent, task, context?)` — Send a task to another agent. Creates their session if needed.');
-    sections.push('- `squad_send(agentName, message)` — Send a message and wait for the response. Use for coordination and handoffs.');
-    sections.push('- `squad_read_session(agentName, lastN?)` — Read an agent\'s conversation history. Use to check progress or get results.');
-    sections.push('- `squad_decide(author, summary, body)` — Record a team decision to .squad/decisions/inbox/.');
-    sections.push('- `squad_memory(agent, section, content)` — Append to an agent\'s history for future sessions.');
-    sections.push('- `squad_status()` — Check session pool state.');
-    sections.push('');
-    sections.push('**Delegation pattern:** Use `squad_route` to dispatch work, `squad_read_session` to monitor progress, and `squad_send` to unblock agents or get synchronous responses.');
-    sections.push('');
-
-    return sections.join('\n');
   }
 
   /**
@@ -824,45 +919,55 @@ export class AgentSessionManager {
    * null if no history exists or all sections are empty.
    */
   private buildHistoryInjection(agentName: string): string | null {
-    const historyContent = this.readFileSafe(
-      path.join(this.squadRoot, '.squad', 'agents', agentName, 'history.md'),
-    );
-    if (!historyContent) return null;
-
-    // Parse sections in priority order
-    const prioritySections = ['Learnings', 'Decisions', 'Patterns', 'Issues'] as const;
-    const extracted: string[] = [];
-    let totalLength = 0;
-
-    for (const sectionName of prioritySections) {
-      const sectionRegex = new RegExp(
-        `^##\\s+${sectionName}\\s*$([\\s\\S]*?)(?=^##\\s|$)`,
-        'm',
+    try {
+      const historyContent = this.readFileSafe(
+        path.join(this.squadRoot, '.squad', 'agents', agentName, 'history.md'),
       );
-      const match = historyContent.match(sectionRegex);
-      if (!match) continue;
+      if (!historyContent) return null;
 
-      const content = match[1]!.trim();
-      // Skip empty sections or placeholder comments
-      if (!content || /^<!--.*-->$/.test(content)) continue;
+      // Parse sections in priority order
+      const prioritySections = ['Learnings', 'Decisions', 'Patterns', 'Issues'] as const;
+      const extracted: string[] = [];
+      let totalLength = 0;
 
-      const sectionBlock = `### ${sectionName}\n\n${content}`;
+      for (const sectionName of prioritySections) {
+        try {
+          const sectionRegex = new RegExp(
+            `^##\\s+${sectionName}\\s*$([\\s\\S]*?)(?=^##\\s|$)`,
+            'm',
+          );
+          const match = historyContent.match(sectionRegex);
+          if (!match) continue;
 
-      // Respect budget — stop adding sections when we'd exceed the limit
-      if (totalLength + sectionBlock.length > MAX_HISTORY_BYTES) {
-        // Try to fit a truncated version
-        const remaining = MAX_HISTORY_BYTES - totalLength;
-        if (remaining > 100) {
-          extracted.push(`### ${sectionName}\n\n…${content.slice(-(remaining - 30))}`);
+          const content = match[1]!.trim();
+          // Skip empty sections or placeholder comments
+          if (!content || /^<!--.*-->$/.test(content)) continue;
+
+          const sectionBlock = `### ${sectionName}\n\n${content}`;
+
+          // Respect budget — stop adding sections when we'd exceed the limit
+          if (totalLength + sectionBlock.length > MAX_HISTORY_BYTES) {
+            // Try to fit a truncated version
+            const remaining = MAX_HISTORY_BYTES - totalLength;
+            if (remaining > 100) {
+              extracted.push(`### ${sectionName}\n\n…${content.slice(-(remaining - 30))}`);
+            }
+            break;
+          }
+
+          extracted.push(sectionBlock);
+          totalLength += sectionBlock.length;
+        } catch (err) {
+          console.error(`[History Injection] ✗ Error processing section ${sectionName} for ${agentName}: ${err}`);
+          // Continue to next section
         }
-        break;
       }
 
-      extracted.push(sectionBlock);
-      totalLength += sectionBlock.length;
+      return extracted.length > 0 ? extracted.join('\n\n') : null;
+    } catch (err) {
+      console.error(`[History Injection] ✗ Failed to build history injection for ${agentName}: ${err}`);
+      return null;
     }
-
-    return extracted.length > 0 ? extracted.join('\n\n') : null;
   }
 
   /**
