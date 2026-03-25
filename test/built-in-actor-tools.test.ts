@@ -144,8 +144,8 @@ describe('Coordinator tool restrictions', () => {
 describe('Sage tool restrictions', () => {
   const sage = getBuiltInActor('sage')!;
 
-  it('should have exactly 7 tools', () => {
-    expect(sage.allowedTools).toHaveLength(7);
+  it('should have exactly 5 tools', () => {
+    expect(sage.allowedTools).toHaveLength(5);
   });
 
   it('should have squad_decide for proposing decisions', () => {
@@ -156,12 +156,12 @@ describe('Sage tool restrictions', () => {
     expect(sage.allowedTools).toContain('squad_memory');
   });
 
-  it('should have squad_skill for reading and writing skills', () => {
-    expect(sage.allowedTools).toContain('squad_skill');
+  it('should NOT have squad_skill (removed to prevent junk output)', () => {
+    expect(sage.allowedTools).not.toContain('squad_skill');
   });
 
-  it('should have squad_proposals for writing improvement proposals', () => {
-    expect(sage.allowedTools).toContain('squad_proposals');
+  it('should NOT have squad_proposals (removed to prevent junk output)', () => {
+    expect(sage.allowedTools).not.toContain('squad_proposals');
   });
 
   it('should NOT have squad_route (sage analyzes, does not dispatch)', () => {
@@ -222,13 +222,13 @@ describe('Tool filtering enforcement', () => {
     ]);
   });
 
-  it('should give Sage 6 squad_* tools', () => {
+  it('should give Sage 5 squad_* tools', () => {
     const sageTools = filterToolsForActor('sage');
-    expect(sageTools).toHaveLength(6);
+    expect(sageTools).toHaveLength(5);
     const names = sageTools.map(t => t.name);
     expect(names).toContain('squad_decide');
     expect(names).toContain('squad_memory');
-    expect(names).toContain('squad_skill');
+    expect(names).not.toContain('squad_skill');
     expect(names).not.toContain('view');
     expect(names).not.toContain('bash');
   });
