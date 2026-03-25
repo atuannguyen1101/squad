@@ -59,6 +59,9 @@ export interface ModelSelectionConfig {
   /** Default model for new agents (Layer 4) */
   defaultModel: ModelId;
   
+  /** Enforce this model for ALL agents — overrides charter preferences */
+  enforceModel?: ModelId;
+  
   /** Default tier when no specific model is chosen */
   defaultTier: ModelTier;
   

@@ -219,6 +219,7 @@ export class SquadServer {
       squadRoot,
       tools: this.toolRegistry.getTools(),
       defaultModel: this.config.defaultModel ?? this.config.squadConfig.models?.defaultModel,
+      enforceModel: this.config.squadConfig.models?.enforceModel,
       workingDirectory: this.config.workingDirectory ?? squadRoot,
       ceremonies: this.config.squadConfig.ceremonies as CeremonyConfig[] | undefined,
     });

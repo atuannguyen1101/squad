@@ -45,6 +45,8 @@ export interface AgentSessionManagerConfig {
   tools: SquadTool<any>[];
   /** Default model when charter doesn't specify one */
   defaultModel?: string;
+  /** Enforce this model for ALL agents, overriding charter preferences */
+  enforceModel?: string;
   /** Working directory for agent sessions */
   workingDirectory?: string;
   /** MCP servers to attach to agent sessions. If not provided, loaded from ~/.copilot/mcp-config.json */
@@ -211,6 +213,7 @@ export class AgentSessionManager {
   private readonly squadRoot: string;
   private readonly tools: SquadTool<any>[];
   private readonly defaultModel: string | undefined;
+  private readonly enforceModel: string | undefined;
   private readonly workingDirectory: string | undefined;
   private readonly charterCompiler: CharterCompiler;
   private readonly mcpServers: Record<string, SquadMCPServerConfig> | undefined;
@@ -230,6 +233,7 @@ export class AgentSessionManager {
     this.squadRoot = config.squadRoot;
     this.tools = config.tools;
     this.defaultModel = config.defaultModel;
+    this.enforceModel = config.enforceModel;
     this.workingDirectory = config.workingDirectory;
     this.charterCompiler = new CharterCompiler();
     this.mcpServers = config.mcpServers ?? loadUserMCPServers();
@@ -335,7 +339,9 @@ export class AgentSessionManager {
     // doesn't expose MCP server tools to programmatic SDK sessions.
 
     const sessionConfig: SquadSessionConfig = {
-      model: charter.modelPreference ?? this.defaultModel,
+      // enforceModel overrides everything — charter preferences ignored
+      // defaultModel is fallback when charter doesn't specify
+      model: this.enforceModel ?? charter.modelPreference ?? this.defaultModel,
       tools: sessionTools,
       systemMessage: {
         mode: 'replace' as const,
