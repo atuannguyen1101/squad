@@ -179,6 +179,8 @@ export class CharterCompiler {
       expertise,
       style,
       prompt: content,
+      allowedTools: parsed.allowedTools,
+      excludedTools: parsed.excludedTools,
       modelPreference: parsed.modelPreference,
       mcpServers: parsed.mcpServers,
     };

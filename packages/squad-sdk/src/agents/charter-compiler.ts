@@ -60,6 +60,10 @@ export interface ParsedCharter {
     expertise?: string[];
     style?: string;
   };
+  /** Allowed tools from ## Tools section (allowlist) */
+  allowedTools?: string[];
+  /** Excluded tools from ## Tools section (denylist) */
+  excludedTools?: string[];
   /** What I Own section content */
   ownership?: string;
   /** Boundaries section content */
@@ -280,6 +284,32 @@ export function parseCharterMarkdown(content: string): ParsedCharter {
   const collaborationMatch = content.match(/##\s+Collaboration\s*\n([\s\S]*?)(?=\n##|\n---|$)/i);
   if (collaborationMatch) {
     result.collaboration = collaborationMatch[1]!.trim();
+  }
+
+  // Extract ## Tools section
+  // Supports two formats:
+  //   1. allowed: tool1, tool2, tool3
+  //   2. excluded: squad_route, squad_send
+  const toolsMatch = content.match(/##\s+Tools\s*\n([\s\S]*?)(?=\n##|\n---|$)/i);
+  if (toolsMatch) {
+    const toolsContent = toolsMatch[1]!;
+    
+    // Parse "allowed: tool1, tool2" or "excluded: tool1, tool2"
+    const allowedMatch = toolsContent.match(/allowed\s*:\s*(.+)/i);
+    if (allowedMatch) {
+      result.allowedTools = allowedMatch[1]!
+        .split(',')
+        .map(t => t.trim())
+        .filter(t => t.length > 0);
+    }
+    
+    const excludedMatch = toolsContent.match(/excluded\s*:\s*(.+)/i);
+    if (excludedMatch) {
+      result.excludedTools = excludedMatch[1]!
+        .split(',')
+        .map(t => t.trim())
+        .filter(t => t.length > 0);
+    }
   }
 
   // Extract ## MCP Servers section

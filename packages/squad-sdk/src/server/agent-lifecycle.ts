@@ -305,17 +305,29 @@ export class AgentSessionManager {
     // Get working file paths from existing session (if any) for instruction injection
     const existingEntry = this.sessions.get(resolved);
     const workingFilePaths = existingEntry?.workingFilePaths;
-    
-    const systemPrompt = await this.buildSystemPrompt(resolved, charter, workingFilePaths);
 
-    // SDK-enforced tool restrictions for built-in actors.
-    // Built-in actors (Ben, Coordinator, Sage) get ONLY their allowedTools —
-    // no file access, no git, no code analysis. This prevents role boundary
-    // violations deterministically through code, not charter prose.
+    // --- Tool filtering: unified for both built-in actors and chartered agents ---
+    // Priority: built-in allowedTools > charter excludedTools > charter allowedTools > all tools
     const builtIn = getBuiltInActor(resolved);
-    const sessionTools = builtIn?.allowedTools
-      ? this.tools.filter(t => builtIn.allowedTools!.includes(t.name))
-      : this.tools;
+    let sessionTools: SquadTool<any>[];
+
+    if (builtIn?.allowedTools) {
+      // Built-in actors: strict allowlist from code
+      sessionTools = this.tools.filter(t => builtIn.allowedTools!.includes(t.name));
+    } else if (charter.excludedTools && charter.excludedTools.length > 0) {
+      // Chartered agents with excludedTools: remove specific tools
+      const excluded = new Set(charter.excludedTools);
+      sessionTools = this.tools.filter(t => !excluded.has(t.name));
+    } else if (charter.allowedTools && charter.allowedTools.length > 0) {
+      // Chartered agents with allowedTools: strict allowlist
+      const allowed = new Set(charter.allowedTools);
+      sessionTools = this.tools.filter(t => allowed.has(t.name));
+    } else {
+      // Default: all tools
+      sessionTools = this.tools;
+    }
+
+    const systemPrompt = await this.buildSystemPrompt(resolved, charter, workingFilePaths, sessionTools);
 
     // Note: MCP tools are provided via the MCP Bridge (tools/mcp-bridge.ts) which
     // spawns MCP servers at squad server startup and registers their tools as squad tools.
@@ -535,7 +547,7 @@ export class AgentSessionManager {
    * @param charter - The compiled charter
    * @param workingFilePaths - Optional list of file paths the agent is working on (for instruction injection)
    */
-  private async buildSystemPrompt(agentName: string, charter: AgentCharter, workingFilePaths?: string[]): Promise<string> {
+  private async buildSystemPrompt(agentName: string, charter: AgentCharter, workingFilePaths?: string[], sessionTools?: SquadTool<any>[]): Promise<string> {
     try {
       const sections: string[] = [];
 
@@ -621,24 +633,23 @@ export class AgentSessionManager {
         console.error(`[System Prompt] ✗ Error checking squad tools for ${agentName}: ${err}`);
       }
 
-      // 7. Squad communication tools
-      // Agents inside squad sessions have SDK tools (squad_route, squad_send, etc.)
-      // List the actual tool names they can call.
+      // 7. Available tools — list only the tools this agent's session actually has.
+      // Tool filtering happens at session creation (see getOrCreateSession).
+      // The system prompt simply documents what the agent can call.
       try {
-        sections.push('## Squad Communication\n');
-        sections.push('You can communicate with other squad members using these tools:');
-        sections.push('- `squad_route(targetAgent, task, context?)` — Send a task to another agent. Creates their session if needed.');
-        sections.push('- `squad_send(agentName, message)` — Send a message and wait for the response. Use for coordination and handoffs.');
-        sections.push('- `squad_read_session(agentName, lastN?)` — Read an agent\'s conversation history. Use to check progress or get results.');
-        sections.push('- `squad_decide(author, summary, body)` — Record a team decision to .squad/decisions/inbox/.');
-        sections.push('- `squad_memory(agent, section, content)` — Append to an agent\'s history for future sessions.');
-        sections.push('- `squad_status()` — Check session pool state.');
-        sections.push('');
-        sections.push('**Delegation pattern:** Use `squad_route` to dispatch work, `squad_read_session` to monitor progress, and `squad_send` to unblock agents or get synchronous responses.');
-        sections.push('');
+        const toolNames = sessionTools?.map(t => t.name) ?? this.tools.map(t => t.name);
+        if (toolNames.length > 0) {
+          sections.push('## Available Tools\n');
+          sections.push('You have the following tools available:');
+          for (const name of toolNames) {
+            sections.push(`- \`${name}\``);
+          }
+          sections.push('');
+          sections.push('**Work directly.** Use your tools to complete the task yourself. Do not simulate or role-play other agents.');
+          sections.push('');
+        }
       } catch (err) {
-        console.error(`[System Prompt] ✗ Error building squad communication section for ${agentName}: ${err}`);
-        // Continue - these are standard instructions
+        console.error(`[System Prompt] ✗ Error building tools section for ${agentName}: ${err}`);
       }
 
       const result = sections.join('\n');
