@@ -164,6 +164,10 @@ export function parseRoutingDecision(output: string): RoutingDecision | null {
  * Multi-subtask decisions produce:
  *   - implement-0, implement-1, ... (parallel) only (if reviewer is null)
  *   - implement-0, implement-1, ... (parallel) → review (if reviewer is present)
+ * 
+ * IMPORTANT: Review phases ARE created when a reviewer is specified. The review
+ * phase will be executed after all implementation phases complete. The reviewer
+ * is instructed to use squad_read_session to inspect the implementer's work.
  */
 export function generateImplPhases(
   decision: RoutingDecision,
