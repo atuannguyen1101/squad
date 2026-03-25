@@ -111,14 +111,16 @@ export class PulseCollector {
    * Track a message for an agent and emit a warning if threshold is exceeded.
    */
   trackMessage(agentName: string): void {
-    const currentCount = this.messageCountsByAgent.get(agentName) || 0;
+    // Normalize agent name to lowercase to avoid duplicate tracking
+    const normalizedName = agentName.toLowerCase();
+    const currentCount = this.messageCountsByAgent.get(normalizedName) || 0;
     const newCount = currentCount + 1;
-    this.messageCountsByAgent.set(agentName, newCount);
+    this.messageCountsByAgent.set(normalizedName, newCount);
 
     // Warning at threshold — informational only, no session termination
     if (newCount >= this.messageCountWarningThreshold && 
-        !this.messageCountWarningsEmitted.has(agentName)) {
-      this.messageCountWarningsEmitted.add(agentName);
+        !this.messageCountWarningsEmitted.has(normalizedName)) {
+      this.messageCountWarningsEmitted.add(normalizedName);
       const warningPulse: Pulse = {
         agent: 'System',
         phase: 'reviewing',
@@ -141,21 +143,24 @@ export class PulseCollector {
   }
 
   record(pulse: Pulse): PulseFilter {
+    // Normalize agent name to lowercase to avoid duplicate tracking
+    const normalizedPulse = { ...pulse, agent: pulse.agent.toLowerCase() };
+    
     // Check for progress regression before recording
-    const previousPulses = this.pulses.filter(p => p.agent === pulse.agent);
+    const previousPulses = this.pulses.filter(p => p.agent === normalizedPulse.agent);
     if (previousPulses.length > 0) {
       const lastPulse = previousPulses[previousPulses.length - 1];
       // Detect backward progress (regression threshold: >10% backward movement)
-      if (lastPulse && lastPulse.progressPct > pulse.progressPct && 
-          lastPulse.progressPct - pulse.progressPct > 10) {
-        this.progressWarningListener?.(pulse.agent, lastPulse.progressPct, pulse.progressPct);
+      if (lastPulse && lastPulse.progressPct > normalizedPulse.progressPct && 
+          lastPulse.progressPct - normalizedPulse.progressPct > 10) {
+        this.progressWarningListener?.(normalizedPulse.agent, lastPulse.progressPct, normalizedPulse.progressPct);
         // Optionally emit a warning pulse
         const warningPulse: Pulse = {
           agent: 'System',
           phase: 'reviewing',
           status: 'warning',
           progressPct: 0,
-          summary: `Progress regression detected: ${pulse.agent} went from ${lastPulse.progressPct}% to ${pulse.progressPct}%`,
+          summary: `Progress regression detected: ${normalizedPulse.agent} went from ${lastPulse.progressPct}% to ${normalizedPulse.progressPct}%`,
           blockers: [],
           questionsForUser: [],
           artifacts: [],
@@ -172,15 +177,15 @@ export class PulseCollector {
       }
     }
 
-    this.pulses.push(pulse);
-    const filter = filterPulseForUser(pulse);
+    this.pulses.push(normalizedPulse);
+    const filter = filterPulseForUser(normalizedPulse);
     if (filter.userRelevant) {
-      this.userQueue.push(pulse);
-      this.onUserRelevantPulse?.(pulse);
+      this.userQueue.push(normalizedPulse);
+      this.onUserRelevantPulse?.(normalizedPulse);
     }
     // Notify all pulse listeners (used by waitForDonePulse)
     for (const listener of this.pulseListeners) {
-      try { listener(pulse); } catch { /* listener errors are non-fatal */ }
+      try { listener(normalizedPulse); } catch { /* listener errors are non-fatal */ }
     }
     return filter;
   }
@@ -329,6 +334,6 @@ export class PulseCollector {
    * Get the current message count for an agent.
    */
   getMessageCount(agentName: string): number {
-    return this.messageCountsByAgent.get(agentName) ?? 0;
+    return this.messageCountsByAgent.get(agentName.toLowerCase()) ?? 0;
   }
 }
