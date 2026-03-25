@@ -205,7 +205,7 @@ export const BUILT_IN_ACTORS: Record<string, BuiltInActor> = {
     style: 'Analytical, evidence-based, proposes concrete changes.',
     charter: SAGE_CHARTER,
     // Sage analyzes and proposes — reads sessions, records decisions and proposals, no dispatch or file access.
-    allowedTools: ['squad_pulse', 'squad_read_session', 'squad_status', 'squad_decide', 'squad_memory', 'squad_skill', 'squad_proposals'],
+    allowedTools: ['squad_pulse', 'squad_read_session', 'squad_status', 'squad_decide', 'squad_memory'],
   },
 };
 

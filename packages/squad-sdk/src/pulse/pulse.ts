@@ -240,7 +240,7 @@ export class PulseCollector {
           if (timeSinceLastPulse >= autoPulseThresholdMs) {
             // Generate an auto-pulse
             const autoPulse: Pulse = {
-              agent: agentName,
+              agent: lowerAgentName,
               phase: 'implementing',
               status: 'ok',
               progressPct: 0,
@@ -306,7 +306,7 @@ export class PulseCollector {
   getLatestByAgent(): Map<string, Pulse> {
     const latest = new Map<string, Pulse>();
     for (const pulse of this.pulses) {
-      latest.set(pulse.agent, pulse);
+      latest.set(pulse.agent.toLowerCase(), pulse);
     }
     return latest;
   }
