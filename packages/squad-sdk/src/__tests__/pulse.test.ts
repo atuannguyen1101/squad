@@ -47,7 +47,7 @@ describe('PulseCollector - Progress Regression Detection', () => {
     collector.record(pulse1);
     collector.record(pulse2);
 
-    expect(regressionCallback).toHaveBeenCalledWith('TestAgent', 80, 30);
+    expect(regressionCallback).toHaveBeenCalledWith('testagent', 80, 30);
   });
 
   it('should emit a warning pulse for regression', () => {
@@ -131,8 +131,8 @@ describe('PulseCollector - Message Count Tracking', () => {
     collector.trackMessage('Agent1');
     collector.trackMessage('Agent2');
     
-    expect(collector['messageCountsByAgent'].get('Agent1')).toBe(2);
-    expect(collector['messageCountsByAgent'].get('Agent2')).toBe(1);
+    expect(collector['messageCountsByAgent'].get('agent1')).toBe(2);
+    expect(collector['messageCountsByAgent'].get('agent2')).toBe(1);
   });
 
   it('should emit warning when threshold exceeded', () => {
@@ -219,9 +219,9 @@ describe('PulseCollector - Case-Insensitive Agent Matching', () => {
     expect(result1).toBeDefined();
     expect(result2).toBeDefined();
     expect(result3).toBeDefined();
-    expect(result1?.agent).toBe('TestAgent');
-    expect(result2?.agent).toBe('TestAgent');
-    expect(result3?.agent).toBe('TestAgent');
+    expect(result1?.agent).toBe('testagent');
+    expect(result2?.agent).toBe('testagent');
+    expect(result3?.agent).toBe('testagent');
   });
 });
 
@@ -245,7 +245,7 @@ describe('PulseCollector - Auto-Pulse Safety Net', () => {
 
     const allPulses = collector.getAll();
     const autoPulse = allPulses.find(
-      p => p.agent === 'SilentAgent' && p.summary.includes('Still working')
+      p => p.agent === 'silentagent' && p.summary.includes('Still working')
     );
 
     expect(autoPulse).toBeDefined();
