@@ -440,9 +440,46 @@ export class AgentSessionManager {
             });
           }
         }
-      } catch {
-        // Timeout or error — fall back to fire-and-forget
-        await session.sendMessage({ prompt });
+      } catch (error: any) {
+        // Check if this is a "Session not found" error
+        const isSessionNotFound = error?.message?.includes('Session not found') || 
+                                  error?.toString?.()?.includes('Session not found');
+        
+        if (isSessionNotFound) {
+          // Session expired — remove stale session and retry with a fresh one
+          this.sessions.delete(resolvedName);
+          try {
+            const { session: newSession } = await this.getOrCreateSession(agentName);
+            if (newSession.sendAndWait) {
+              const retryResult = await newSession.sendAndWait({ prompt }, 300_000);
+              const retryContent = extractResponseContent(retryResult);
+              const newEntry = this.sessions.get(resolvedName);
+              if (newEntry) {
+                if (retryContent) {
+                  newEntry.messages.push({ role: 'assistant', content: retryContent, timestamp: new Date().toISOString() });
+                } else if (retryResult != null) {
+                  newEntry.messages.push({
+                    role: 'assistant',
+                    content: TOOL_CALL_PLACEHOLDER,
+                    timestamp: new Date().toISOString(),
+                  });
+                }
+              }
+            } else {
+              // New session doesn't support sendAndWait — fall back to sendMessage
+              await newSession.sendMessage({ prompt });
+            }
+          } catch {
+            // Retry failed — fall back to fire-and-forget with the new session
+            const currentEntry = this.sessions.get(resolvedName);
+            if (currentEntry?.session) {
+              await currentEntry.session.sendMessage({ prompt });
+            }
+          }
+        } else {
+          // Timeout or other error — fall back to fire-and-forget
+          await session.sendMessage({ prompt });
+        }
       }
     } else {
       await session.sendMessage({ prompt });
@@ -840,10 +877,48 @@ You can communicate with other squad members using these tools:
           return placeholder;
         }
         return content;
-      } catch {
-        // Timeout or error — fall back to fire-and-forget
-        await entry.session.sendMessage({ prompt: message });
-        return null;
+      } catch (error: any) {
+        // Check if this is a "Session not found" error
+        const isSessionNotFound = error?.message?.includes('Session not found') || 
+                                  error?.toString?.()?.includes('Session not found');
+        
+        if (isSessionNotFound) {
+          // Session expired — remove stale session and retry with a fresh one
+          this.sessions.delete(resolved);
+          try {
+            const { session: newSession } = await this.getOrCreateSession(agentName);
+            if (newSession.sendAndWait) {
+              const retryResult = await newSession.sendAndWait({ prompt: message }, 120_000);
+              const retryContent = extractResponseContent(retryResult);
+              const newEntry = this.sessions.get(resolved);
+              if (newEntry) {
+                if (retryContent) {
+                  newEntry.messages.push({ role: 'assistant', content: retryContent, timestamp: new Date().toISOString() });
+                } else if (retryResult != null) {
+                  const placeholder = TOOL_CALL_PLACEHOLDER;
+                  newEntry.messages.push({ role: 'assistant', content: placeholder, timestamp: new Date().toISOString() });
+                  return placeholder;
+                }
+              }
+              return retryContent;
+            } else {
+              // New session doesn't support sendAndWait — fall back to sendMessage
+              await newSession.sendMessage({ prompt: message });
+              return null;
+            }
+          } catch {
+            // Retry failed — fall back to fire-and-forget with the new session
+            const currentEntry = this.sessions.get(resolved);
+            if (currentEntry?.session) {
+              await currentEntry.session.sendMessage({ prompt: message });
+            }
+            return null;
+          }
+        } else {
+          // Timeout or other error — fall back to fire-and-forget
+          await entry.session.sendMessage({ prompt: message });
+          return null;
+        }
       }
     }
 
