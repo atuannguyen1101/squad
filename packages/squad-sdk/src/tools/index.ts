@@ -1184,6 +1184,76 @@ export class ToolRegistry {
       },
     });
     this.tools.set('squad_proposals', squadProposals);
+
+    // --- squad_mcp_call: Proxy MCP tool calls through VS Code's auth context ---
+    const squadMcpCall = defineTool<{ server: string; tool: string; args?: Record<string, unknown> }>({
+      name: 'squad_mcp_call',
+      description: 'Call an MCP tool through the VS Code MCP proxy. Use for auth-protected MCP servers like ibizafxmcp that require VS Code auth context. Example: squad_mcp_call({ server: "ibizafxmcp", tool: "search_samples", args: { search_term: "DataGrid" } })',
+      parameters: {
+        type: 'object',
+        properties: {
+          server: { type: 'string', description: 'MCP server name (e.g., "ibizafxmcp")' },
+          tool: { type: 'string', description: 'Tool name without server prefix (e.g., "search_samples")' },
+          args: { type: 'object', description: 'Tool arguments as key-value pairs' },
+        },
+        required: ['server', 'tool'],
+      },
+      handler: async (input) => {
+        const proxyPort = this.findMcpProxyPort();
+        if (!proxyPort) {
+          return {
+            textResultForLlm: 'MCP proxy not available. The Squad MCP Proxy VS Code extension is not running. Install and activate it to enable auth-protected MCP calls.',
+            resultType: 'failure' as const,
+            error: 'MCP proxy not found',
+          };
+        }
+
+        try {
+          const response = await fetch(`http://127.0.0.1:${proxyPort}/call`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ server: input.server, tool: input.tool, args: input.args ?? {} }),
+            signal: AbortSignal.timeout(120_000),
+          });
+
+          if (!response.ok) {
+            const err = await response.json().catch(() => ({ error: response.statusText })) as { error?: string };
+            return {
+              textResultForLlm: `MCP proxy error (${response.status}): ${err.error ?? 'unknown'}`,
+              resultType: 'failure' as const,
+              error: err.error ?? response.statusText,
+            };
+          }
+
+          const data = await response.json() as { tool?: string; result?: string; error?: string };
+          return {
+            textResultForLlm: data.result ?? JSON.stringify(data),
+            resultType: 'success' as const,
+          };
+        } catch (err) {
+          return {
+            textResultForLlm: `MCP proxy call failed: ${err instanceof Error ? err.message : err}`,
+            resultType: 'failure' as const,
+            error: String(err),
+          };
+        }
+      },
+    });
+    this.tools.set('squad_mcp_call', squadMcpCall);
+  }
+
+  /** Find the MCP proxy port from workspace or env */
+  private findMcpProxyPort(): number | null {
+    const envPort = process.env['SQUAD_MCP_PROXY_PORT'];
+    if (envPort) return parseInt(envPort, 10);
+
+    const portFile = path.join(this.squadRoot, '.squad', '.mcp-proxy-port');
+    try {
+      const port = parseInt(fs.readFileSync(portFile, 'utf-8').trim(), 10);
+      if (port > 0) return port;
+    } catch { /* not found */ }
+
+    return null;
   }
 
   /** Get all registered tools for session config */
