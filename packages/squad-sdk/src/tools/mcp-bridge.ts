@@ -113,20 +113,28 @@ export class McpBridge {
         env: { ...process.env, ...(server.env ?? {}) } as Record<string, string>,
         cwd: server.cwd ?? this.config.squadRoot,
       });
-    } else if (serverType === 'http') {
+    } else if (serverType === 'http' || serverType === 'sse') {
       const url = new URL(server.url!);
-      transport = new StreamableHTTPClientTransport(url, {
-        requestInit: {
-          headers: server.headers ?? {},
-        },
-      });
-    } else if (serverType === 'sse') {
-      const url = new URL(server.url!);
-      transport = new SSEClientTransport(url, {
-        requestInit: {
-          headers: server.headers ?? {},
-        },
-      });
+      const headers: Record<string, string> = { ...(server.headers ?? {}) };
+
+      // Try to acquire auth token via Squad Auth Proxy (VS Code extension)
+      if (!headers['Authorization']) {
+        const token = await this.acquireAuthToken(url.origin);
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+          console.error(`[mcp-bridge] Acquired auth token for ${name} via auth proxy`);
+        }
+      }
+
+      if (serverType === 'http') {
+        transport = new StreamableHTTPClientTransport(url, {
+          requestInit: { headers },
+        });
+      } else {
+        transport = new SSEClientTransport(url, {
+          requestInit: { headers },
+        });
+      }
     } else {
       throw new Error(`Unsupported server type: ${serverType}`);
     }
@@ -197,6 +205,71 @@ export class McpBridge {
         error: String(err),
       };
     }
+  }
+
+  /**
+   * Acquire an auth token via the Squad Auth Proxy (VS Code extension).
+   * The proxy runs as a localhost HTTP server and uses VS Code's authentication API.
+   * Returns null if the proxy isn't available.
+   */
+  private async acquireAuthToken(serverOrigin: string): Promise<string | null> {
+    const proxyPort = this.findAuthProxyPort();
+    if (!proxyPort) return null;
+
+    try {
+      // Derive the scope from the server origin (standard Azure AD pattern)
+      const scopes = [`${serverOrigin}/.default`];
+
+      const response = await fetch(`http://127.0.0.1:${proxyPort}/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scopes }),
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ error: response.statusText })) as { error?: string };
+        console.error(`[mcp-bridge] Auth proxy returned ${response.status}: ${err.error ?? 'unknown'}`);
+        return null;
+      }
+
+      const data = await response.json() as { token?: string; account?: string };
+      if (data.token) {
+        console.error(`[mcp-bridge] Auth proxy: token acquired for ${data.account ?? 'unknown account'}`);
+        return data.token;
+      }
+      return null;
+    } catch (err) {
+      console.error(`[mcp-bridge] Auth proxy unavailable: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Find the Squad Auth Proxy port from environment, workspace, or global storage.
+   */
+  private findAuthProxyPort(): number | null {
+    // 1. Environment variable (set by the VS Code extension for child processes)
+    const envPort = process.env['SQUAD_AUTH_PROXY_PORT'];
+    if (envPort) return parseInt(envPort, 10);
+
+    // 2. Workspace file (.squad/.auth-proxy-port)
+    if (this.config.squadRoot) {
+      const wsPortFile = path.join(this.config.squadRoot, '.squad', '.auth-proxy-port');
+      try {
+        const port = parseInt(fs.readFileSync(wsPortFile, 'utf-8').trim(), 10);
+        if (port > 0) return port;
+      } catch { /* not found */ }
+    }
+
+    // 3. Home directory fallback
+    const homePortFile = path.join(os.homedir(), '.squad', '.auth-proxy-port');
+    try {
+      const port = parseInt(fs.readFileSync(homePortFile, 'utf-8').trim(), 10);
+      if (port > 0) return port;
+    } catch { /* not found */ }
+
+    return null;
   }
 
   /**
