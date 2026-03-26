@@ -210,6 +210,9 @@ export interface RoutingConfig {
   /** @copilot capability evaluation */
   copilotEvaluation?: CopilotCapabilityEvaluation;
   
+  /** Default reviewer to use when coordinator returns null (optional) */
+  defaultReviewer?: string;
+  
   /** Routing governance rules */
   governance?: {
     eagerByDefault?: boolean;

@@ -1021,6 +1021,16 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         const routingDecision = parseRoutingDecision(routeResult.output as string);
         if (!routingDecision) return;
 
+        // Apply defaultReviewer if coordinator returned null and config specifies one
+        if (routingDecision.reviewer === null && options.squadConfig?.routing?.defaultReviewer) {
+          const defaultRev = options.squadConfig.routing.defaultReviewer.toLowerCase();
+          if (routingDecision.kind === 'single') {
+            routingDecision.reviewer = defaultRev;
+          } else if (routingDecision.kind === 'multi') {
+            routingDecision.reviewer = defaultRev;
+          }
+        }
+
         const revName = routingDecision.reviewer;
         
         // Create role detectors for gate validation
