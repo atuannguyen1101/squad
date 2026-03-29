@@ -22,6 +22,7 @@ import { analyzeRun, formatAnalysisReport, type SessionSnapshot } from './analyz
 import { triggerAutoSageAnalysis } from './auto-sage.js';
 import { resolveDashboardPort, persistPort, clearPersistedPort } from './dashboard-port.js';
 import { parseCharterMetadata } from '../config/agent-source.js';
+import { RunContextManager } from './run-context.js';
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -725,13 +726,18 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  // --- Team Ben: Pulse Collector + Intent Graph state ---
-  const pulseCollector = server.getPulseCollector();
+  // --- Team Ben: Multi-run state management (TODO: complete migration) ---
+  const runContextManager = new RunContextManager();
+
+  // Legacy singleton state (will be removed after full migration)
   let activeIntentGraph: IntentGraph | null = null;
   let pendingUserQuestions: string[] = [];
   let waitResolvers: Array<(value: string) => void> = [];
   let activePipelines: PipelineRunner[] = [];
   let activeRunId: string | null = null;
+
+  // Pulse collector
+  const pulseCollector = server.getPulseCollector();
 
   pulseCollector.setOnUserRelevantPulse((pulse) => {
     const questions = pulse.questionsForUser ?? [];
@@ -792,6 +798,10 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
 
       const runId = `run-${Date.now()}`;
       activeRunId = runId;
+      
+      // Create RunContext for multi-run support (currently only tracked, not fully used)
+      const runContext = runContextManager.create(runId, args.message);
+      
       activeIntentGraph = createEmptyIntentGraph(args.message);
       pulseCollector.clear();
       server.getScratchpad().clear();
