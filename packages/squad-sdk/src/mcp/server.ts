@@ -881,9 +881,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           // AUTO-EMIT DONE PULSE: After agent completes, emit completion signal
           // so gates have completion data without requiring agents to call squad_pulse manually.
           const responseContent = lastReply?.content ?? '';
-          const derivedSummary = responseContent.length > 100 
-            ? responseContent.substring(0, 97) + '...' 
-            : responseContent || 'Work completed';
+          const derivedSummary = responseContent || 'Work completed';
           
           runContext.pulseCollector.record(createPulse({
             agent: result.agentName,
@@ -1081,9 +1079,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             
             // AUTO-EMIT DONE PULSE immediately after dispatch
             const responseContent = lastReply?.content ?? '';
-            const derivedSummary = responseContent.length > 100
-              ? responseContent.substring(0, 97) + '...'
-              : responseContent || 'Work completed';
+            const derivedSummary = responseContent || 'Work completed';
             runContext.pulseCollector.record(createPulse({
               agent: agentName,
               phase: 'done',
