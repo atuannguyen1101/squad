@@ -1586,9 +1586,12 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         // Close agent sessions for this run
         if (mgr) {
           try {
+            // BLOCKER #6 FIX: Count sessions BEFORE closing them
+            const sessionsToClose = mgr.listActiveSessions().filter(s => s.runId === context.runId);
+            const sessionCount = sessionsToClose.length;
+            
             await mgr.closeRunSessions(context.runId);
-            const sessions = mgr.listActiveSessions().filter(s => s.runId === context.runId);
-            summaryLines.push(`Closed ${sessions.length} agent session(s).`);
+            summaryLines.push(`Closed ${sessionCount} agent session(s).`);
           } catch (err) {
             summaryLines.push(`Failed to close sessions: ${err instanceof Error ? err.message : String(err)}`);
           }

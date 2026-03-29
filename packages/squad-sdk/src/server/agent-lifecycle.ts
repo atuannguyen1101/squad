@@ -319,16 +319,19 @@ export class AgentSessionManager {
       return { session: existing.session, created: false, resolvedName: resolved, sessionKey };
     }
 
-    // Check the pool for an orphaned session (e.g. created outside this manager)
-    const poolSession = this.client.pool.findByAgent(resolved);
-    if (poolSession) {
-      this.client.pool.remove(poolSession.id);
-    }
+    // BLOCKER #4 FIX: Don't use findByAgent — it searches by name only and will
+    // corrupt cross-run sessions. Session keys must be unique per run.
+    // If we need to clean up orphaned sessions, we'd need a different approach
+    // that respects the runId. For now, skip this entirely.
+    
+    // Note: Previous code used findByAgent(resolved) which violates multi-run isolation.
+    // Removed as per landmine #4.
 
     const charter = await this.compileCharter(resolved);
     
+    // BLOCKER #5 FIX: Use sessionKey, not resolved agent name
     // Get working file paths from existing session (if any) for instruction injection
-    const existingEntry = this.sessions.get(resolved);
+    const existingEntry = this.sessions.get(sessionKey);
     const workingFilePaths = existingEntry?.workingFilePaths;
 
     // --- Tool filtering: unified for both built-in actors and chartered agents ---
