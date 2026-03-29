@@ -124,7 +124,7 @@
     </div>
   </div>
   <script>
-    let agents = [], events = [], seenKeys = new Set(), selectedAgent = null, currentTab = 'events', msgCache = {};
+    let agents = [], events = [], runs = [], seenKeys = new Set(), selectedAgent = null, selectedAgentName = null, currentTab = 'events', msgCache = {};
     const $ = id => document.getElementById(id);
 
     function fmtUp(s) { if (!s) return ''; if (s<60) return s+'s'; if (s<3600) return ~~(s/60)+'m'; return ~~(s/3600)+'h '+~~((s%3600)/60)+'m'; }
@@ -143,17 +143,46 @@
       const el = $('agentList');
       $('sessionCount').textContent = agents.length;
       if (!agents.length) { el.innerHTML = '<div class="empty">No active agents</div>'; return; }
-      el.innerHTML = agents.map(a => {
-        const sel = a.agentName === selectedAgent ? ' selected' : '';
-        const role = a.charterRole || 'agent';
-        const mc = a.messageCount || 0;
-        const st = agentStatus(a);
-        return `<div class="agent-item${sel} ${st.cls}" onclick="selectAgent('${a.agentName}')">
-          <div class="name"><span class="status-dot ${st.cls}"></span>${a.agentName}</div>
-          <div class="role" style="color:${roleColor(role)}">${role}</div>
-          <div class="meta">${mc} msgs | ${st.label}</div>
-        </div>`;
-      }).join('');
+
+      const runGroups = new Map();
+      const unassigned = [];
+      for (const a of agents) {
+        let assigned = false;
+        for (const r of runs) {
+          if (r.sessionIds && r.sessionIds.includes(a.sessionId)) {
+            if (!runGroups.has(r.runId)) runGroups.set(r.runId, { run: r, agents: [] });
+            runGroups.get(r.runId).agents.push(a);
+            assigned = true;
+            break;
+          }
+        }
+        if (!assigned) unassigned.push(a);
+      }
+
+      let html = '';
+      for (const [runId, group] of runGroups) {
+        const shortId = runId.replace('run-', '').slice(-6);
+        const intent = (group.run.intent || '').length > 40 ? group.run.intent.slice(0, 37) + '...' : group.run.intent || '';
+        html += `<div style="margin:4px 0 2px;padding:4px 8px;font-size:10px;color:#d2a8ff;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #21262d">Run ...${escHtml(shortId)} <span style="color:#484f58;text-transform:none;letter-spacing:0">${escHtml(intent)}</span></div>`;
+        html += group.agents.map(a => renderAgentItem(a)).join('');
+      }
+      if (unassigned.length) {
+        if (runGroups.size > 0) html += '<div style="margin:4px 0 2px;padding:4px 8px;font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #21262d">Other</div>';
+        html += unassigned.map(a => renderAgentItem(a)).join('');
+      }
+      el.innerHTML = html;
+    }
+
+    function renderAgentItem(a) {
+      const sel = a.sessionId === selectedAgent ? ' selected' : '';
+      const role = a.charterRole || 'agent';
+      const mc = a.messageCount || 0;
+      const st = agentStatus(a);
+      return `<div class="agent-item${sel} ${st.cls}" onclick="selectAgent('${a.sessionId}','${a.agentName}')">
+        <div class="name"><span class="status-dot ${st.cls}"></span>${a.agentName}</div>
+        <div class="role" style="color:${roleColor(role)}">${role}</div>
+        <div class="meta">${mc} msgs | ${st.label}</div>
+      </div>`;
     }
 
     function renderEvents() {
@@ -209,7 +238,7 @@
       if (currentTab !== 'detail') return;
       if (!selectedAgent) { el.innerHTML = '<div class="empty">Select an agent from the sidebar</div>'; return; }
       const msgs = msgCache[selectedAgent] || [];
-      if (!msgs.length) { el.innerHTML = `<div class="empty">No messages yet for ${selectedAgent}</div>`; return; }
+      if (!msgs.length) { el.innerHTML = `<div class="empty">No messages yet for ${selectedAgentName || selectedAgent}</div>`; return; }
       const atBot = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
       const filtered = msgs.filter(m => (m.content||'').trim().length > 0);
       const groups = groupMessages(filtered);
@@ -243,7 +272,7 @@
         const ts = m.timestamp ? m.timestamp.slice(11,19) : '';
         const cls = m.role === 'user' ? 'user' : 'assistant';
         const content = (m.content||'').length > 8000 ? m.content.slice(0,8000)+'...' : m.content||'';
-        return `<div class="msg ${cls}" data-agent="${selectedAgent}"><span class="ts">${ts}</span>${renderMd(content)}</div>`;
+        return `<div class="msg ${cls}" data-agent="${selectedAgentName || selectedAgent}"><span class="ts">${ts}</span>${renderMd(content)}</div>`;
       }).join('');
       if (atBot) el.scrollTop = el.scrollHeight;
     }
@@ -303,30 +332,29 @@
       if (tab==='events') renderEvents(); else renderDetail();
     }
 
-    async function selectAgent(name) {
-      selectedAgent = name;
-      $('dAgent').value = name;
+    async function selectAgent(sessionId, displayName) {
+      selectedAgent = sessionId;
+      selectedAgentName = displayName || sessionId;
+      $('dAgent').value = displayName || sessionId;
       renderAgents();
       switchTab('detail');
-      const a = agents.find(x => x.agentName === name);
+      const a = agents.find(x => x.sessionId === sessionId);
       const st = a ? agentStatus(a) : { cls: 'unknown' };
       const input = $('sendMsg');
       input.placeholder = st.cls === 'idle' || st.cls === 'stale'
-        ? `Wake up ${name} with a message...`
-        : `Send follow-up to ${name}...`;
-      await fetchMessages(name);
+        ? `Wake up ${selectedAgentName} with a message...`
+        : `Send follow-up to ${selectedAgentName}...`;
+      await fetchMessages(sessionId);
     }
 
-    async function fetchMessages(name) {
+    async function fetchMessages(sessionId) {
       try {
-        const res = await fetch(`/api/sessions/${encodeURIComponent(name)}`);
+        const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
         if (res.ok) {
           const d = await res.json();
           const newMsgs = d.messages || [];
-          const oldMsgs = msgCache[name] || [];
-          // Only re-render if message count changed
+          const oldMsgs = msgCache[sessionId] || [];
           if (newMsgs.length !== oldMsgs.length) {
-            // Save open details states and scroll position
             const el = $('contentBody');
             const openStates = new Set();
             el.querySelectorAll('details.subagent-box').forEach((det, i) => {
@@ -335,7 +363,7 @@
             const scrollTop = el.scrollTop;
             const wasAtBottom = scrollTop + el.clientHeight >= el.scrollHeight - 40;
 
-            msgCache[name] = newMsgs;
+            msgCache[sessionId] = newMsgs;
             renderDetail();
 
             // Restore open details states
@@ -370,8 +398,11 @@
             const working = agents.filter(a => agentStatus(a).cls === 'working').length;
             const idle = agents.length - working;
             $('sessionCount').innerHTML = `${agents.length}` + (agents.length > 0 ? ` <span style="font-weight:normal;color:#8b949e">(${working} working, ${idle} idle)</span>` : '');
-            renderAgents();
           }
+          if (d.runs) {
+            runs = d.runs;
+          }
+          renderAgents();
           if (d.recentEvents) {
             let added = false;
             for (const e of d.recentEvents) {

@@ -906,6 +906,30 @@ You can communicate with other squad members using these tools:
   }
 
   /**
+   * List all sessions for a specific run ID.
+   * Returns session entries where the key ends with ::runId.
+   */
+  listSessionsForRun(runId: string): AgentSessionEntry[] {
+    const suffix = '::' + runId;
+    return Array.from(this.sessions.entries())
+      .filter(([key]) => key.endsWith(suffix))
+      .map(([, entry]) => entry);
+  }
+
+  /**
+   * Get messages for a session by its UUID sessionId.
+   * Useful when you have the sessionId but not the agent name (e.g., from dashboard).
+   */
+  getMessagesBySessionId(sessionId: string): SessionMessage[] {
+    for (const entry of this.sessions.values()) {
+      if (entry.session.sessionId === sessionId) {
+        return entry.messages;
+      }
+    }
+    return [];
+  }
+
+  /**
    * Get conversation messages for a specific agent session.
    * If runId is provided, looks up the session key; otherwise uses legacy lookup.
    */

@@ -734,7 +734,6 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
   let pendingUserQuestions: string[] = [];
   let waitResolvers: Array<(value: string) => void> = [];
   let activePipelines: PipelineRunner[] = [];
-  let activeRunId: string | null = null;
 
   // Pulse collector
   const pulseCollector = server.getPulseCollector();
@@ -799,21 +798,11 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       },
     },
     async (args) => {
-      if (activeRunId) {
-        return {
-          content: [{
-            type: 'text',
-            text: `A run is already active (${activeRunId}). Use squad_cancel to stop it first, or squad_wait to monitor progress.`,
-          }],
-        };
-      }
-
       await ensureStarted();
       const mgr = server.getSessionManager();
       if (!mgr) throw new Error('Server not ready');
 
       const runId = `run-${Date.now()}`;
-      activeRunId = runId;
       
       // Create RunContext for multi-run support (currently only tracked, not fully used)
       const runContext = runContextManager.create(runId, args.message);
@@ -1181,15 +1170,14 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           summary: `Pipeline failed: ${err instanceof Error ? err.message : String(err)}`,
           blockers: [String(err)], questionsForUser: [], artifacts: [], nextStep: '',
         }));
-      }).finally(() => {
-        activeRunId = null;
       });
 
       return {
         content: [{
           type: 'text',
           text: [
-            `Pipeline started: understand(ben) → route(coordinator) → implement + review (selected by coordinator)`,
+            `Run started: ${runId}`,
+            `Pipeline: understand(ben) → route(coordinator) → implement + review (selected by coordinator)`,
             `Intent: ${args.message}`,
             `Roster: ${rosterSummary.split('\n').length} agents available`,
             dashboardUrl ? `Dashboard: ${dashboardUrl}` : null,
@@ -1732,6 +1720,18 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       } else if (req.url === '/api/status') {
         const st = started ? server.getStatus() : { running: false, activeSessions: 0, agents: [], poolCapacity: 0, connectedToHost: false };
         const history = started ? server.getEventHistory() : null;
+        const mgr = started ? server.getSessionManager() : null;
+        
+        // Add run information with sessionIds for multi-run support
+        const runs = runContextManager.getAll()
+          .filter(r => r.status === 'active')
+          .map(r => ({
+            runId: r.runId,
+            intent: r.initialMessage,
+            status: r.status,
+            sessionIds: mgr ? mgr.listSessionsForRun(r.runId).map(s => s.session.sessionId) : [],
+          }));
+        
         res.writeHead(200, cors);
         res.end(JSON.stringify({
           ...st,
@@ -1740,6 +1740,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           sessionCount: st.activeSessions,
           recentEvents: history?.recent(100) ?? [],
           totalEvents: history?.size ?? 0,
+          runs,
         }));
       } else if (req.url === '/api/dispatch' && req.method === 'POST') {
         let body = '';
@@ -1774,12 +1775,18 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           }
         });
       } else if (req.url?.startsWith('/api/sessions/') && req.method === 'GET') {
-        const agentName = decodeURIComponent(req.url.split('/api/sessions/')[1]?.split('?')[0] ?? '');
-        if (!agentName) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agent name required' })); return; }
+        const idOrName = decodeURIComponent(req.url.split('/api/sessions/')[1]?.split('?')[0] ?? '');
+        if (!idOrName) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agent name or session ID required' })); return; }
         const mgr = server.getSessionManager();
-        const messages = mgr?.getMessages(agentName) ?? [];
+        
+        // Check if it looks like a UUID (sessionId) — has dashes and is longer than typical agent names
+        const isSessionId = idOrName.includes('-') && idOrName.length > 30;
+        const messages = isSessionId 
+          ? (mgr?.getMessagesBySessionId(idOrName) ?? [])
+          : (mgr?.getMessages(idOrName) ?? []);
+        
         res.writeHead(200, cors);
-        res.end(JSON.stringify({ agentName, messages }));
+        res.end(JSON.stringify({ [isSessionId ? 'sessionId' : 'agentName']: idOrName, messages }));
       } else if (req.url === '/api/send' && req.method === 'POST') {
         let body = '';
         req.on('data', (c: Buffer) => body += c.toString());
