@@ -29,6 +29,7 @@ import {
   type ContextWindowState,
 } from '../context/index.js';
 import { injectInstructions } from '../agents/instruction-injector.js';
+import { safeSendAndWait, DispatchSemaphore } from '../mcp/dispatch-utils.js';
 
 // ============================================================================
 // Types
@@ -66,6 +67,8 @@ export interface SessionMessage {
 export interface AgentSessionEntry {
   /** Agent name */
   agentName: string;
+  /** Run ID this session belongs to (for multi-run isolation) */
+  runId?: string;
   /** The live SDK session */
   session: SquadSession;
   /** Compiled charter used to create the session */
@@ -94,6 +97,7 @@ export interface DispatchResult {
 export interface ActiveSessionInfo {
   agentName: string;
   sessionId: string;
+  runId?: string;
   createdAt: Date;
   lastActiveAt: Date;
   charterRole: string;
@@ -203,6 +207,14 @@ function loadUserMCPServers(): Record<string, SquadMCPServerConfig> | undefined 
   }
 }
 
+/**
+ * Generate a session key for the sessions map.
+ * Format: agentName::runId (or just agentName if no runId)
+ */
+function makeSessionKey(agentName: string, runId?: string): string {
+  return runId ? `${agentName}::${runId}` : agentName;
+}
+
 // ============================================================================
 // AgentSessionManager
 // ============================================================================
@@ -224,10 +236,13 @@ export class AgentSessionManager {
   private persistence: ServerPersistence | null = null;
   private serverStartedAt: string = new Date().toISOString();
 
-  /** Active agent sessions keyed by agent name */
+  /** Active agent sessions keyed by agentName::runId (or just agentName for legacy) */
   private sessions: Map<string, AgentSessionEntry> = new Map();
 
-  constructor(config: AgentSessionManagerConfig) {
+  /** Dispatch semaphore to serialize sendAndWait calls (max 1 concurrent) */
+  private dispatchSemaphore: DispatchSemaphore;
+
+  constructor(config: AgentSessionManagerConfig & { dispatchSemaphore?: DispatchSemaphore }) {
     this.client = config.client;
     this.eventBus = config.eventBus;
     this.squadRoot = config.squadRoot;
@@ -238,6 +253,7 @@ export class AgentSessionManager {
     this.charterCompiler = new CharterCompiler();
     this.mcpServers = config.mcpServers ?? loadUserMCPServers();
     this.contextWindowConfig = config.contextWindowConfig;
+    this.dispatchSemaphore = config.dispatchSemaphore ?? new DispatchSemaphore(1);
     this.ceremonyEngine = config.ceremonies?.length
       ? new CeremonyTriggerEngine(
           config.ceremonies,
@@ -287,15 +303,20 @@ export class AgentSessionManager {
 
   /**
    * Get an existing session for an agent, or create a new one.
-   * Sessions are keyed by agent name — each agent has at most one active session.
+   * Sessions are keyed by agentName::runId for multi-run isolation.
+   * If no runId is provided, uses legacy single-session keying.
    */
-  async getOrCreateSession(agentName: string): Promise<{ session: SquadSession; created: boolean; resolvedName: string }> {
+  async getOrCreateSession(
+    agentName: string,
+    runId?: string
+  ): Promise<{ session: SquadSession; created: boolean; resolvedName: string; sessionKey: string }> {
     // Resolve abbreviated names (e.g. "koba" → "kobayashi") then normalize case
     const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
+    const sessionKey = makeSessionKey(resolved, runId);
 
-    const existing = this.sessions.get(resolved);
+    const existing = this.sessions.get(sessionKey);
     if (existing) {
-      return { session: existing.session, created: false, resolvedName: resolved };
+      return { session: existing.session, created: false, resolvedName: resolved, sessionKey };
     }
 
     // Check the pool for an orphaned session (e.g. created outside this manager)
@@ -356,6 +377,7 @@ export class AgentSessionManager {
     const now = new Date();
     const entry: AgentSessionEntry = {
       agentName: resolved,
+      runId,
       session,
       charter,
       createdAt: now,
@@ -363,7 +385,7 @@ export class AgentSessionManager {
       messages: [],
       contextWindowState: createContextWindowState(),
     };
-    this.sessions.set(resolved, entry);
+    this.sessions.set(sessionKey, entry);
 
     // Subscribe to session events to capture assistant responses
     try {
@@ -391,19 +413,24 @@ export class AgentSessionManager {
       type: 'session:created',
       sessionId: session.sessionId,
       agentName: resolved,
-      payload: { role: charter.role, model: charter.modelPreference ?? this.defaultModel },
+      payload: { role: charter.role, model: charter.modelPreference ?? this.defaultModel, runId },
       timestamp: now,
     });
 
-    return { session, created: true, resolvedName: resolved };
+    return { session, created: true, resolvedName: resolved, sessionKey };
   }
 
   /**
    * Send a message to an agent, creating a session if needed.
    * Returns dispatch metadata including the session ID and whether a new session was created.
+   * 
+   * @param agentName - Name of the agent to dispatch to
+   * @param message - Message to send
+   * @param context - Optional context to append
+   * @param runId - Optional run ID for multi-run isolation
    */
-  async dispatch(agentName: string, message: string, context?: string): Promise<DispatchResult> {
-    const { session, created, resolvedName } = await this.getOrCreateSession(agentName);
+  async dispatch(agentName: string, message: string, context?: string, runId?: string): Promise<DispatchResult> {
+    const { session, created, resolvedName, sessionKey } = await this.getOrCreateSession(agentName, runId);
 
     const prompt = context
       ? `${message}\n\n<context>\n${context}\n</context>`
@@ -411,7 +438,7 @@ export class AgentSessionManager {
 
     this.ceremonyEngine?.onActivity();
 
-    const entry = this.sessions.get(resolvedName);
+    const entry = this.sessions.get(sessionKey);
     if (entry) {
       entry.lastActiveAt = new Date();
       entry.messages.push({
@@ -421,24 +448,30 @@ export class AgentSessionManager {
       });
     }
 
-    // Use sendAndWait to capture the assistant's response
+    // Use safeSendAndWait with semaphore protection to capture the assistant's response
     if (session.sendAndWait) {
       try {
-        const result = await session.sendAndWait({ prompt }, 300_000);
-        const content = extractResponseContent(result);
-        if (entry) {
-          if (content) {
-            entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
-          } else if (result != null) {
-            // Agent completed its turn but returned empty text — likely did work via
-            // tool calls (file edits, commands). Record a placeholder so waitForResponse
-            // can detect that the turn finished instead of timing out.
-            entry.messages.push({
-              role: 'assistant',
-              content: TOOL_CALL_PLACEHOLDER,
-              timestamp: new Date().toISOString(),
-            });
+        // Acquire semaphore before sending (max 1 concurrent sendAndWait)
+        const release = await this.dispatchSemaphore.acquire();
+        try {
+          const result = await safeSendAndWait(session, prompt, 90_000);
+          const content = extractResponseContent(result);
+          if (entry) {
+            if (content) {
+              entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
+            } else if (result != null) {
+              // Agent completed its turn but returned empty text — likely did work via
+              // tool calls (file edits, commands). Record a placeholder so waitForResponse
+              // can detect that the turn finished instead of timing out.
+              entry.messages.push({
+                role: 'assistant',
+                content: TOOL_CALL_PLACEHOLDER,
+                timestamp: new Date().toISOString(),
+              });
+            }
           }
+        } finally {
+          release();
         }
       } catch (error: any) {
         // Check if this is a "Session not found" error
@@ -447,23 +480,28 @@ export class AgentSessionManager {
         
         if (isSessionNotFound) {
           // Session expired — remove stale session and retry with a fresh one
-          this.sessions.delete(resolvedName);
+          this.sessions.delete(sessionKey);
           try {
-            const { session: newSession } = await this.getOrCreateSession(agentName);
+            const { session: newSession, sessionKey: newKey } = await this.getOrCreateSession(agentName, runId);
             if (newSession.sendAndWait) {
-              const retryResult = await newSession.sendAndWait({ prompt }, 300_000);
-              const retryContent = extractResponseContent(retryResult);
-              const newEntry = this.sessions.get(resolvedName);
-              if (newEntry) {
-                if (retryContent) {
-                  newEntry.messages.push({ role: 'assistant', content: retryContent, timestamp: new Date().toISOString() });
-                } else if (retryResult != null) {
-                  newEntry.messages.push({
-                    role: 'assistant',
-                    content: TOOL_CALL_PLACEHOLDER,
-                    timestamp: new Date().toISOString(),
-                  });
+              const release = await this.dispatchSemaphore.acquire();
+              try {
+                const retryResult = await safeSendAndWait(newSession, prompt, 90_000);
+                const retryContent = extractResponseContent(retryResult);
+                const newEntry = this.sessions.get(newKey);
+                if (newEntry) {
+                  if (retryContent) {
+                    newEntry.messages.push({ role: 'assistant', content: retryContent, timestamp: new Date().toISOString() });
+                  } else if (retryResult != null) {
+                    newEntry.messages.push({
+                      role: 'assistant',
+                      content: TOOL_CALL_PLACEHOLDER,
+                      timestamp: new Date().toISOString(),
+                    });
+                  }
                 }
+              } finally {
+                release();
               }
             } else {
               // New session doesn't support sendAndWait — fall back to sendMessage
@@ -471,7 +509,7 @@ export class AgentSessionManager {
             }
           } catch {
             // Retry failed — fall back to fire-and-forget with the new session
-            const currentEntry = this.sessions.get(resolvedName);
+            const currentEntry = this.sessions.get(sessionKey);
             if (currentEntry?.session) {
               await currentEntry.session.sendMessage({ prompt });
             }
@@ -779,8 +817,15 @@ You can communicate with other squad members using these tools:
    * Extracts learnings from the conversation and persists them to the
    * agent's history shadow before destroying the session.
    */
-  async closeSession(agentName: string): Promise<void> {
-    const entry = this.sessions.get(agentName);
+  /**
+   * Close a specific agent session.
+   * If runId is provided, closes only that specific run's session.
+   * Otherwise closes the legacy single-session or the first matching session.
+   */
+  async closeSession(agentName: string, runId?: string): Promise<void> {
+    const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
+    const sessionKey = makeSessionKey(resolved, runId);
+    const entry = this.sessions.get(sessionKey);
     if (!entry) return;
 
     // Capture data BEFORE deletion for learning persistence
@@ -788,7 +833,7 @@ You can communicate with other squad members using these tools:
     const sessionDuration = Date.now() - entry.createdAt.getTime();
 
     // Extract and persist learnings from this session (best-effort)
-    await this.persistSessionLearnings(agentName, capturedMessages);
+    await this.persistSessionLearnings(resolved, capturedMessages);
 
     try {
       await entry.session.close();
@@ -799,7 +844,7 @@ You can communicate with other squad members using these tools:
     // Remove from session pool to free capacity
     this.client.pool.remove(entry.session.sessionId);
 
-    this.sessions.delete(agentName);
+    this.sessions.delete(sessionKey);
 
     // Persist registry after session removal
     if (this.persistence) {
@@ -809,16 +854,28 @@ You can communicate with other squad members using these tools:
     await this.eventBus.emit({
       type: 'session:destroyed',
       sessionId: entry.session.sessionId,
-      agentName,
+      agentName: resolved,
       payload: {
         durationMs: sessionDuration,
         messages: capturedMessages,
         messageCount: capturedMessages.length,
+        runId: entry.runId,
       },
       timestamp: new Date(),
     });
 
-    this.ceremonyEngine?.onSessionClosed(agentName);
+    this.ceremonyEngine?.onSessionClosed(resolved);
+  }
+
+  /**
+   * Close all sessions for a specific run.
+   */
+  async closeRunSessions(runId: string): Promise<void> {
+    const sessionKeys = Array.from(this.sessions.keys()).filter(key => key.includes(`::${runId}`));
+    await Promise.allSettled(sessionKeys.map(key => {
+      const agentName = key.split('::')[0];
+      return this.closeSession(agentName!, runId);
+    }));
   }
 
   /**
@@ -837,6 +894,7 @@ You can communicate with other squad members using these tools:
     return Array.from(this.sessions.values()).map(entry => ({
       agentName: entry.agentName,
       sessionId: entry.session.sessionId,
+      runId: entry.runId,
       createdAt: entry.createdAt,
       lastActiveAt: entry.lastActiveAt,
       charterRole: entry.charter.role,
@@ -846,37 +904,49 @@ You can communicate with other squad members using these tools:
 
   /**
    * Get conversation messages for a specific agent session.
+   * If runId is provided, looks up the session key; otherwise uses legacy lookup.
    */
-  getMessages(agentName: string): SessionMessage[] {
+  getMessages(agentName: string, runId?: string): SessionMessage[] {
     const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
-    return this.sessions.get(resolved)?.messages ?? [];
+    const sessionKey = makeSessionKey(resolved, runId);
+    return this.sessions.get(sessionKey)?.messages ?? [];
   }
 
   /**
    * Send a follow-up message to an existing agent session.
+   * 
+   * @param agentName - Name of the agent
+   * @param message - Follow-up message to send
+   * @param runId - Optional run ID for multi-run isolation
    */
-  async sendFollowUp(agentName: string, message: string): Promise<string | null> {
+  async sendFollowUp(agentName: string, message: string, runId?: string): Promise<string | null> {
     const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
-    const entry = this.sessions.get(resolved);
-    if (!entry) throw new Error(`No active session for ${resolved}`);
+    const sessionKey = makeSessionKey(resolved, runId);
+    const entry = this.sessions.get(sessionKey);
+    if (!entry) throw new Error(`No active session for ${resolved}${runId ? ` (runId: ${runId})` : ''}`);
 
     entry.messages.push({ role: 'user', content: message, timestamp: new Date().toISOString() });
     entry.lastActiveAt = new Date();
 
-    // Use sendAndWait if available (returns when agent finishes its turn)
+    // Use safeSendAndWait with semaphore protection if available
     if (entry.session.sendAndWait) {
       try {
-        const result = await entry.session.sendAndWait({ prompt: message }, 120_000);
-        const content = extractResponseContent(result);
-        if (content) {
-          entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
-        } else if (result != null) {
-          // Agent completed its turn with empty text — likely did work via tool calls.
-          const placeholder = TOOL_CALL_PLACEHOLDER;
-          entry.messages.push({ role: 'assistant', content: placeholder, timestamp: new Date().toISOString() });
-          return placeholder;
+        const release = await this.dispatchSemaphore.acquire();
+        try {
+          const result = await safeSendAndWait(entry.session, message, 90_000);
+          const content = extractResponseContent(result);
+          if (content) {
+            entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
+          } else if (result != null) {
+            // Agent completed its turn with empty text — likely did work via tool calls.
+            const placeholder = TOOL_CALL_PLACEHOLDER;
+            entry.messages.push({ role: 'assistant', content: placeholder, timestamp: new Date().toISOString() });
+            return placeholder;
+          }
+          return content;
+        } finally {
+          release();
         }
-        return content;
       } catch (error: any) {
         // Check if this is a "Session not found" error
         const isSessionNotFound = error?.message?.includes('Session not found') || 
@@ -884,23 +954,28 @@ You can communicate with other squad members using these tools:
         
         if (isSessionNotFound) {
           // Session expired — remove stale session and retry with a fresh one
-          this.sessions.delete(resolved);
+          this.sessions.delete(sessionKey);
           try {
-            const { session: newSession } = await this.getOrCreateSession(agentName);
+            const { session: newSession, sessionKey: newKey } = await this.getOrCreateSession(agentName, runId);
             if (newSession.sendAndWait) {
-              const retryResult = await newSession.sendAndWait({ prompt: message }, 120_000);
-              const retryContent = extractResponseContent(retryResult);
-              const newEntry = this.sessions.get(resolved);
-              if (newEntry) {
-                if (retryContent) {
-                  newEntry.messages.push({ role: 'assistant', content: retryContent, timestamp: new Date().toISOString() });
-                } else if (retryResult != null) {
-                  const placeholder = TOOL_CALL_PLACEHOLDER;
-                  newEntry.messages.push({ role: 'assistant', content: placeholder, timestamp: new Date().toISOString() });
-                  return placeholder;
+              const release = await this.dispatchSemaphore.acquire();
+              try {
+                const retryResult = await safeSendAndWait(newSession, message, 90_000);
+                const retryContent = extractResponseContent(retryResult);
+                const newEntry = this.sessions.get(newKey);
+                if (newEntry) {
+                  if (retryContent) {
+                    newEntry.messages.push({ role: 'assistant', content: retryContent, timestamp: new Date().toISOString() });
+                  } else if (retryResult != null) {
+                    const placeholder = TOOL_CALL_PLACEHOLDER;
+                    newEntry.messages.push({ role: 'assistant', content: placeholder, timestamp: new Date().toISOString() });
+                    return placeholder;
+                  }
                 }
+                return retryContent;
+              } finally {
+                release();
               }
-              return retryContent;
             } else {
               // New session doesn't support sendAndWait — fall back to sendMessage
               await newSession.sendMessage({ prompt: message });
@@ -908,7 +983,7 @@ You can communicate with other squad members using these tools:
             }
           } catch {
             // Retry failed — fall back to fire-and-forget with the new session
-            const currentEntry = this.sessions.get(resolved);
+            const currentEntry = this.sessions.get(sessionKey);
             if (currentEntry?.session) {
               await currentEntry.session.sendMessage({ prompt: message });
             }
