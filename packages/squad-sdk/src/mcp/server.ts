@@ -1109,16 +1109,28 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         activePipelines.push(implPipeline); // Keep legacy in sync
         const implState = await implPipeline.run();
 
-        // Emit the REAL "Pipeline complete" pulse — all four phases
-        // (understand, route, implement, review) have now finished.
-        // This is the signal that squad_wait should wake on.
+        // Emit the REAL "Pipeline complete" pulse with actual results from agents.
+        // Collect all phase outputs so squad_wait returns the full findings.
+        let completionSummary: string;
+        if (implState.status === 'completed') {
+          const phaseOutputs: string[] = [];
+          for (const [phaseId, result] of implState.phaseResults) {
+            if (result.output && typeof result.output === 'string' && result.output.length > 0) {
+              phaseOutputs.push(`### ${result.agent} (${phaseId})\n${result.output}`);
+            }
+          }
+          completionSummary = phaseOutputs.length > 0
+            ? phaseOutputs.join('\n\n---\n\n')
+            : 'Pipeline complete. All phases passed but no output was captured.';
+        } else {
+          completionSummary = 'Pipeline failed. Check phase results.';
+        }
+
         runContext.pulseCollector.record(createPulse({
           agent: 'ben', phase: implState.status === 'completed' ? 'done' : 'blocked',
           status: implState.status === 'completed' ? 'ok' : 'error',
           progressPct: 100,
-          summary: implState.status === 'completed'
-            ? 'Pipeline complete. All phases passed.\n\nUse squad_run or squad_ask for all interactions — Ben is your interface.'
-            : 'Pipeline failed. Check phase results.',
+          summary: completionSummary,
           blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
         }));
 
