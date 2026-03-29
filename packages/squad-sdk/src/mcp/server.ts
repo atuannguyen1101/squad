@@ -1159,8 +1159,10 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
               },
               squadRoot: options.squadRoot,
             }).catch((err: unknown) => {
-              // Auto-analysis errors are non-fatal but must not be silent
               process.stderr.write(`[squad] auto-sage: triggerAutoSageAnalysis failed: ${err instanceof Error ? err.message : String(err)}\n`);
+            }).finally(async () => {
+              // Close sage session after analysis completes — prevents accumulation
+              try { await autoMgr.closeSession('sage', runId); } catch { /* ignore */ }
             });
           }
         }
