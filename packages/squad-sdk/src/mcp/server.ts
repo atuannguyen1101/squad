@@ -768,6 +768,22 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
     pulseCollector.trackMessage(agentName);
   };
 
+  // Helper to resolve RunContext with fallback to most recent run
+  const resolveRunContext = (runId?: string) => {
+    if (runId) {
+      const context = runContextManager.get(runId);
+      if (!context) {
+        throw new Error(`Run ${runId} not found`);
+      }
+      return context;
+    }
+    const context = runContextManager.getMostRecent();
+    if (!context) {
+      throw new Error('No active run. Use squad_run to start a new run.');
+    }
+    return context;
+  };
+
   // squad_run: Start a team run via Ben (user-facing entry point)
   registerTool(
     {
@@ -844,16 +860,16 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       const rosterSummary = agentRoster.map(a => `- ${a.name}: ${a.role}`).join('\n');
 
       const waitForResponse = async (agentName: string, timeoutMs: number): Promise<string | null> => {
-        let currentCount = mgr.getMessages(agentName).filter((m: any) => m.role === 'assistant').length;
+        let currentCount = mgr.getMessages(agentName, runId).filter((m: any) => m.role === 'assistant').length;
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
-          const msgs = mgr.getMessages(agentName);
+          const msgs = mgr.getMessages(agentName, runId);
           const replies = msgs.filter((m: any) => m.role === 'assistant');
           if (replies.length > currentCount) {
             // If the agent asked questions via pulse, don't accept this reply yet.
             // Wait for the user to respond (squad_respond clears pendingUserQuestions),
             // then capture the agent's NEXT reply after Q&A resolution.
-            if (pendingUserQuestions.length > 0) {
+            if (runContext.pendingUserQuestions.length > 0) {
               currentCount = replies.length;
               await new Promise(r => setTimeout(r, 3000));
               continue;
@@ -868,9 +884,9 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       const pipelineDeps: PipelineRunnerDeps = {
         dispatch: async (agentName: string, task: string, context?: string) => {
           trackAgentMessage(agentName);
-          const result = await server.dispatch(agentName, task, context);
+          const result = await mgr.dispatch(agentName, task, context, runId);
           // Grab the latest assistant reply captured by sendAndWait in dispatch
-          const msgs = mgr.getMessages(agentName);
+          const msgs = mgr.getMessages(agentName, runId);
           const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
           
           // AUTO-EMIT DONE PULSE: After agent completes, emit completion signal
@@ -880,7 +896,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             ? responseContent.substring(0, 97) + '...' 
             : responseContent || 'Work completed';
           
-          pulseCollector.record(createPulse({
+          runContext.pulseCollector.record(createPulse({
             agent: result.agentName,
             phase: 'done',
             status: 'ok',
@@ -901,7 +917,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         },
         waitForResponse,
         onPhaseStart: (phaseId: string, agent: string) => {
-          pulseCollector.record(createPulse({
+          runContext.pulseCollector.record(createPulse({
             agent, phase: 'starting', status: 'ok', progressPct: 0,
             summary: `Phase ${phaseId} starting`, blockers: [], questionsForUser: [],
             artifacts: [], nextStep: phaseId,
@@ -918,7 +934,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
               ? `${agentResponse}`
               : `Phase ${result.phaseId} completed`;
 
-          pulseCollector.record(createPulse({
+          runContext.pulseCollector.record(createPulse({
             agent: result.agent,
             phase: result.status === 'completed' ? 'done' : 'blocked',
             status: result.status === 'completed' ? 'ok' : 'error',
@@ -929,13 +945,15 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           }));
 
           // --- Intent Graph updates at key milestones ---
-          if (result.status === 'completed' && activeIntentGraph && typeof result.output === 'string') {
+          if (result.status === 'completed' && runContext.intentGraph && typeof result.output === 'string') {
             if (result.phaseId === 'understand') {
               const updates = parseUnderstandPhaseOutput(result.output);
-              activeIntentGraph = updateIntentGraph(activeIntentGraph, updates);
+              runContext.intentGraph = updateIntentGraph(runContext.intentGraph, updates);
+              activeIntentGraph = runContext.intentGraph; // Keep legacy in sync
             } else if (result.phaseId === 'route') {
               const updates = parseRoutePhaseOutput(result.output);
-              activeIntentGraph = updateIntentGraph(activeIntentGraph, updates);
+              runContext.intentGraph = updateIntentGraph(runContext.intentGraph, updates);
+              activeIntentGraph = runContext.intentGraph; // Keep legacy in sync
             }
           }
         },
@@ -943,7 +961,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           // Only emit a progress pulse here — this is the understand+route
           // pipeline, NOT the full run.  The real "done" pulse is emitted
           // after the impl+review pipeline finishes (see below).
-          pulseCollector.record(createPulse({
+          runContext.pulseCollector.record(createPulse({
             agent: 'ben', phase: state.status === 'completed' ? 'implementing' : 'blocked',
             status: state.status === 'completed' ? 'ok' : 'error',
             progressPct: state.status === 'completed' ? 30 : 100,
@@ -1021,7 +1039,8 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       };
 
       const pipeline = new PipelineRunner(pipelineDefinition, pipelineDeps);
-      activePipelines.push(pipeline);
+      runContext.activePipelines.push(pipeline);
+      activePipelines.push(pipeline); // Keep legacy in sync
 
       pipeline.run().then(async (state) => {
         const routeResult = state.phaseResults.get('route');
@@ -1052,7 +1071,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           contextAddendum,
           toolCallPlaceholder: TOOL_CALL_PLACEHOLDER,
           hasDonePulse: (agentName: string) => {
-            const agentPulses = pulseCollector.getByAgent(agentName);
+            const agentPulses = runContext.pulseCollector.getByAgent(agentName);
             return agentPulses.some(p => p.phase === 'done');
           },
           isPlannerRole,
@@ -1064,43 +1083,35 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           ...pipelineDeps,
           dispatch: async (agentName: string, task: string, context?: string) => {
             trackAgentMessage(agentName);
-            const result = await server.dispatch(agentName, task, context);
-            // sendAndWait returns on the FIRST response turn, but agents doing
-            // multi-step work (file edits, tests, builds) keep executing.
-            // Wait for the agent's "done" pulse before returning — this prevents
-            // the pipeline from evaluating the gate on a partial early response.
-            const donePulse = await pulseCollector.waitForDonePulse(
-              agentName,
-              (implPhases.find(p => p.agent === agentName)?.timeout ?? 300_000) - 5_000,
-            );
-            // After the done pulse (or timeout), grab the latest assistant reply
-            const msgs = mgr.getMessages(agentName);
+            const result = await mgr.dispatch(agentName, task, context, runId);
+            
+            // CRITICAL: Do NOT call waitForDonePulse here (landmine #1 - causes deadlock)
+            // Instead, emit the done pulse immediately after dispatch returns
+            const msgs = mgr.getMessages(agentName, runId);
             const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
             
-            // AUTO-EMIT DONE PULSE if agent didn't emit one manually
-            if (!donePulse) {
-              const responseContent = lastReply?.content ?? '';
-              const derivedSummary = responseContent.length > 100
-                ? responseContent.substring(0, 97) + '...'
-                : responseContent || 'Work completed';
-              pulseCollector.record(createPulse({
-                agent: agentName,
-                phase: 'done',
-                status: 'ok',
-                progressPct: 100,
-                summary: derivedSummary,
-                blockers: [],
-                questionsForUser: [],
-                artifacts: [],
-                nextStep: '',
-              }));
-            }
+            // AUTO-EMIT DONE PULSE immediately after dispatch
+            const responseContent = lastReply?.content ?? '';
+            const derivedSummary = responseContent.length > 100
+              ? responseContent.substring(0, 97) + '...'
+              : responseContent || 'Work completed';
+            runContext.pulseCollector.record(createPulse({
+              agent: agentName,
+              phase: 'done',
+              status: 'ok',
+              progressPct: 100,
+              summary: derivedSummary,
+              blockers: [],
+              questionsForUser: [],
+              artifacts: [],
+              nextStep: '',
+            }));
             
             return {
               sessionId: result.sessionId,
               status: result.status,
               agentName: result.agentName,
-              response: lastReply?.content ?? (donePulse?.summary ?? undefined),
+              response: lastReply?.content ?? undefined,
             };
           },
         };
@@ -1109,13 +1120,14 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           { id: `impl-${Date.now()}`, name: 'Implementation', phases: implPhases },
           implPipelineDeps,
         );
-        activePipelines.push(implPipeline);
+        runContext.activePipelines.push(implPipeline);
+        activePipelines.push(implPipeline); // Keep legacy in sync
         const implState = await implPipeline.run();
 
         // Emit the REAL "Pipeline complete" pulse — all four phases
         // (understand, route, implement, review) have now finished.
         // This is the signal that squad_wait should wake on.
-        pulseCollector.record(createPulse({
+        runContext.pulseCollector.record(createPulse({
           agent: 'ben', phase: implState.status === 'completed' ? 'done' : 'blocked',
           status: implState.status === 'completed' ? 'ok' : 'error',
           progressPct: 100,
@@ -1124,6 +1136,18 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             : 'Pipeline failed. Check phase results.',
           blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
         }));
+
+        // Auto-close run sessions on pipeline completion
+        if (mgr) {
+          try {
+            await mgr.closeRunSessions(runId);
+          } catch (err) {
+            process.stderr.write(`[squad-mcp] Failed to close run sessions: ${err instanceof Error ? err.message : String(err)}\n`);
+          }
+        }
+
+        // Mark run as completed
+        runContextManager.complete(runId);
 
         // Auto-Sage: fire-and-forget post-processing after pipeline completion.
         // Runs AFTER the "done" pulse so squad_wait is not blocked.
@@ -1135,12 +1159,12 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             process.stderr.write('[squad] auto-sage: skipped — session manager unavailable\n');
           } else {
             triggerAutoSageAnalysis({
-              pulseCollector,
-              listActiveSessions: () => autoMgr.listActiveSessions(),
-              getMessages: (agentName: string) => autoMgr.getMessages(agentName),
+              pulseCollector: runContext.pulseCollector,
+              listActiveSessions: () => autoMgr.listActiveSessions().filter(s => s.runId === runId),
+              getMessages: (agentName: string) => autoMgr.getMessages(agentName, runId),
               dispatch: async (agentName: string, message: string, context?: string) => {
-                const result = await server.dispatch(agentName, message, context);
-                const msgs = autoMgr.getMessages(agentName);
+                const result = await mgr.dispatch(agentName, message, context, runId);
+                const msgs = autoMgr.getMessages(agentName, runId);
                 const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
                 return { response: lastReply?.content ?? undefined };
               },
@@ -1152,7 +1176,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           }
         }
       }).catch((err) => {
-        pulseCollector.record(createPulse({
+        runContext.pulseCollector.record(createPulse({
           agent: 'ben', phase: 'blocked', status: 'error', progressPct: 100,
           summary: `Pipeline failed: ${err instanceof Error ? err.message : String(err)}`,
           blockers: [String(err)], questionsForUser: [], artifacts: [], nextStep: '',
@@ -1185,6 +1209,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         type: 'object',
         properties: {
           message: { type: 'string', description: 'Your message to Ben' },
+          runId: { type: 'string', description: 'Optional run ID (defaults to most recent active run)' },
         },
         required: ['message'],
       },
@@ -1195,13 +1220,14 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       if (!mgr) throw new Error('Server not ready');
 
       try {
-        const response = await mgr.sendFollowUp('ben', args.message);
+        const context = resolveRunContext(args.runId);
+        const response = await mgr.sendFollowUp('ben', args.message, context.runId);
 
-        for (const resolver of waitResolvers) {
+        for (const resolver of context.waitResolvers) {
           resolver('user_response');
         }
-        waitResolvers = [];
-        pendingUserQuestions = [];
+        context.waitResolvers = [];
+        context.pendingUserQuestions = [];
 
         return {
           content: [{
@@ -1209,11 +1235,11 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             text: response ?? 'Message sent to Ben.',
           }],
         };
-      } catch {
+      } catch (err) {
         return {
           content: [{
             type: 'text',
-            text: 'Ben does not have an active session. Use squad_run to start a new run.',
+            text: err instanceof Error ? err.message : 'Failed to send message.',
           }],
         };
       }
@@ -1229,6 +1255,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         type: 'object',
         properties: {
           answer: { type: 'string', description: 'Your answer to the team\'s question' },
+          runId: { type: 'string', description: 'Optional run ID (defaults to most recent active run)' },
         },
         required: ['answer'],
       },
@@ -1238,18 +1265,20 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       const mgr = server.getSessionManager();
       if (!mgr) throw new Error('Server not ready');
 
-      const questionContext = pendingUserQuestions.length > 0
-        ? `User answered the following questions: ${pendingUserQuestions.join('; ')}\n\nAnswer: ${args.answer}`
-        : `User response: ${args.answer}`;
-
       try {
-        const response = await mgr.sendFollowUp('ben', questionContext);
+        const context = resolveRunContext(args.runId);
+        
+        const questionContext = context.pendingUserQuestions.length > 0
+          ? `User answered the following questions: ${context.pendingUserQuestions.map(q => q.question).join('; ')}\n\nAnswer: ${args.answer}`
+          : `User response: ${args.answer}`;
 
-        for (const resolver of waitResolvers) {
+        const response = await mgr.sendFollowUp('ben', questionContext, context.runId);
+
+        for (const resolver of context.waitResolvers) {
           resolver('user_response');
         }
-        waitResolvers = [];
-        pendingUserQuestions = [];
+        context.waitResolvers = [];
+        context.pendingUserQuestions = [];
 
         return {
           content: [{
@@ -1257,11 +1286,11 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             text: response ?? 'Response delivered to Ben.',
           }],
         };
-      } catch {
+      } catch (err) {
         return {
           content: [{
             type: 'text',
-            text: 'No active session. Use squad_run to start a new run.',
+            text: err instanceof Error ? err.message : 'Failed to send response.',
           }],
         };
       }
@@ -1351,70 +1380,83 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         type: 'object',
         properties: {
           timeoutMs: { type: 'number', description: 'Maximum wait time in ms (default: 120000 = 2 min)' },
+          runId: { type: 'string', description: 'Optional run ID (defaults to most recent active run)' },
         },
       },
     },
     async (args) => {
       const timeoutMs = args.timeoutMs ?? 120_000;
 
-      const queued = pulseCollector.drainUserQueue();
-      if (queued.length > 0) {
+      try {
+        const context = resolveRunContext(args.runId);
+        const runPulseCollector = context.pulseCollector;
+
+        const queued = runPulseCollector.drainUserQueue();
+        if (queued.length > 0) {
+          return {
+            content: [{
+              type: 'text',
+              text: queued.map(p => formatPulseForUser(p)).join('\n\n---\n\n'),
+            }],
+          };
+        }
+
+        let myResolver: ((value: string) => void) | undefined;
+        const reason = await Promise.race([
+          new Promise<string>(resolve => {
+            myResolver = resolve;
+            context.waitResolvers.push(resolve);
+          }),
+          new Promise<string>(resolve => {
+            setTimeout(() => resolve('timeout'), timeoutMs);
+          }),
+        ]);
+
+        if (myResolver) {
+          context.waitResolvers = context.waitResolvers.filter(r => r !== myResolver);
+        }
+
+        if (reason === 'timeout') {
+          const latest = runPulseCollector.getLatestByAgent();
+          const summaryLines = [...latest.entries()].map(
+            ([agent, p]) => `${agent}: ${p.phase} ${p.progressPct}% — ${p.summary}`,
+          );
+          return {
+            content: [{
+              type: 'text',
+              text: summaryLines.length > 0
+                ? `No user-relevant events in ${timeoutMs / 1000}s. Current status:\n${summaryLines.join('\n')}`
+                : `No events in ${timeoutMs / 1000}s. Team may still be working. Use squad_status for details.`,
+            }],
+          };
+        }
+
+        const newPulses = runPulseCollector.drainUserQueue();
+        if (newPulses.length > 0) {
+          return {
+            content: [{
+              type: 'text',
+              text: newPulses.map(p => formatPulseForUser(p)).join('\n\n---\n\n'),
+            }],
+          };
+        }
+
         return {
           content: [{
             type: 'text',
-            text: queued.map(p => formatPulseForUser(p)).join('\n\n---\n\n'),
+            text: context.pendingUserQuestions.length > 0
+              ? `Team has questions:\n${context.pendingUserQuestions.map((q, i) => `${i + 1}. ${q.question}`).join('\n')}\n\nUse squad_respond to answer.`
+              : `Event received (${reason}). Use squad_status for details.`,
           }],
         };
-      }
-
-      let myResolver: ((value: string) => void) | undefined;
-      const reason = await Promise.race([
-        new Promise<string>(resolve => {
-          myResolver = resolve;
-          waitResolvers.push(resolve);
-        }),
-        new Promise<string>(resolve => {
-          setTimeout(() => resolve('timeout'), timeoutMs);
-        }),
-      ]);
-
-      if (myResolver) {
-        waitResolvers = waitResolvers.filter(r => r !== myResolver);
-      }
-
-      if (reason === 'timeout') {
-        const latest = pulseCollector.getLatestByAgent();
-        const summaryLines = [...latest.entries()].map(
-          ([agent, p]) => `${agent}: ${p.phase} ${p.progressPct}% — ${p.summary}`,
-        );
+      } catch (err) {
         return {
           content: [{
             type: 'text',
-            text: summaryLines.length > 0
-              ? `No user-relevant events in ${timeoutMs / 1000}s. Current status:\n${summaryLines.join('\n')}`
-              : `No events in ${timeoutMs / 1000}s. Team may still be working. Use squad_status for details.`,
+            text: err instanceof Error ? err.message : 'Wait failed.',
           }],
         };
       }
-
-      const newPulses = pulseCollector.drainUserQueue();
-      if (newPulses.length > 0) {
-        return {
-          content: [{
-            type: 'text',
-            text: newPulses.map(p => formatPulseForUser(p)).join('\n\n---\n\n'),
-          }],
-        };
-      }
-
-      return {
-        content: [{
-          type: 'text',
-          text: pendingUserQuestions.length > 0
-            ? `Team has questions:\n${pendingUserQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\nUse squad_respond to answer.`
-            : `Event received (${reason}). Use squad_status for details.`,
-        }],
-      };
     },
   );
 
@@ -1469,55 +1511,113 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       description: 'Cancel an active squad_run pipeline. Cancels all running phases, closes agent sessions, and returns a summary of what was completed before cancellation.',
       inputSchema: {
         type: 'object',
-        properties: {},
+        properties: {
+          runId: { type: 'string', description: 'Optional run ID to cancel (defaults to most recent active run)' },
+          all: { type: 'boolean', description: 'If true, cancel all active runs' },
+        },
       },
     },
-    async () => {
-      if (activePipelines.length === 0) {
+    async (args) => {
+      const mgr = started ? server.getSessionManager() : null;
+      
+      if (args.all) {
+        // Cancel all active runs
+        const allContexts = runContextManager.getAll().filter(c => c.status === 'active');
+        if (allContexts.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'No active runs to cancel.' }],
+          };
+        }
+
+        const summaryLines: string[] = [];
+        for (const context of allContexts) {
+          // Cancel pipelines
+          for (const pipeline of context.activePipelines) {
+            pipeline.cancel();
+            const state = pipeline.getState();
+            const completed = [...state.phaseResults.entries()]
+              .filter(([, r]) => r.status === 'completed')
+              .map(([id]) => id);
+            summaryLines.push(`Run ${context.runId}: cancelled (${completed.length} phases completed: ${completed.join(', ') || 'none'})`);
+          }
+
+          // Close agent sessions for this run
+          if (mgr) {
+            try {
+              await mgr.closeRunSessions(context.runId);
+              summaryLines.push(`Run ${context.runId}: closed agent sessions.`);
+            } catch (err) {
+              summaryLines.push(`Run ${context.runId}: failed to close sessions: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+
+          // Resolve waiters and mark as cancelled
+          for (const resolver of context.waitResolvers) {
+            resolver('cancelled');
+          }
+          runContextManager.cancel(context.runId);
+        }
+
         return {
-          content: [{ type: 'text', text: 'No active pipeline to cancel.' }],
+          content: [{ type: 'text', text: summaryLines.join('\n') }],
         };
       }
 
-      const summaryLines: string[] = [];
-      for (const pipeline of activePipelines) {
-        pipeline.cancel();
-        const state = pipeline.getState();
-        const completed = [...state.phaseResults.entries()]
-          .filter(([, r]) => r.status === 'completed')
-          .map(([id]) => id);
-        summaryLines.push(`Pipeline ${state.pipelineId}: cancelled (${completed.length} phases completed: ${completed.join(', ') || 'none'})`);
-      }
-
-      // Close all agent sessions
-      if (started) {
-        const mgr = server.getSessionManager();
-        if (mgr) {
-          const sessions = mgr.listActiveSessions();
-          for (const s of sessions) {
-            try { await mgr.closeSession(s.agentName); } catch { /* ignore */ }
-          }
-          summaryLines.push(`Closed ${sessions.length} agent session(s).`);
+      // Cancel specific run (or most recent)
+      try {
+        const context = resolveRunContext(args.runId);
+        
+        if (context.activePipelines.length === 0) {
+          return {
+            content: [{ type: 'text', text: `Run ${context.runId} has no active pipelines.` }],
+          };
         }
+
+        const summaryLines: string[] = [];
+        for (const pipeline of context.activePipelines) {
+          pipeline.cancel();
+          const state = pipeline.getState();
+          const completed = [...state.phaseResults.entries()]
+            .filter(([, r]) => r.status === 'completed')
+            .map(([id]) => id);
+          summaryLines.push(`Pipeline ${state.pipelineId}: cancelled (${completed.length} phases completed: ${completed.join(', ') || 'none'})`);
+        }
+
+        // Close agent sessions for this run
+        if (mgr) {
+          try {
+            await mgr.closeRunSessions(context.runId);
+            const sessions = mgr.listActiveSessions().filter(s => s.runId === context.runId);
+            summaryLines.push(`Closed ${sessions.length} agent session(s).`);
+          } catch (err) {
+            summaryLines.push(`Failed to close sessions: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        // Clear context state
+        context.activePipelines = [];
+        context.pendingUserQuestions = [];
+        for (const resolver of context.waitResolvers) {
+          resolver('cancelled');
+        }
+        context.waitResolvers = [];
+
+        context.pulseCollector.record(createPulse({
+          agent: 'ben', phase: 'done', status: 'warning', progressPct: 100,
+          summary: 'Run cancelled by user.',
+          blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
+        }));
+
+        runContextManager.cancel(context.runId);
+
+        return {
+          content: [{ type: 'text', text: summaryLines.join('\n') }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: err instanceof Error ? err.message : 'Cancel failed.' }],
+        };
       }
-
-      activePipelines = [];
-      activeRunId = null;
-      pendingUserQuestions = [];
-      for (const resolver of waitResolvers) {
-        resolver('cancelled');
-      }
-      waitResolvers = [];
-
-      pulseCollector.record(createPulse({
-        agent: 'ben', phase: 'done', status: 'warning', progressPct: 100,
-        summary: 'Run cancelled by user.',
-        blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
-      }));
-
-      return {
-        content: [{ type: 'text', text: summaryLines.join('\n') }],
-      };
     },
   );
 
