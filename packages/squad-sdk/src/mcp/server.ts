@@ -1009,6 +1009,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             '{"subtasks": [...], "reviewer": null}',
             '',
             'Pick the agent whose role best matches the task. If routing rules specify a mandatory reviewer, always assign one. Read the routing rules carefully.',
+            'IMPORTANT: Do NOT pick yourself (coordinator) as the implementer or reviewer. You are the router — pick agents from the roster above.',
           ].join('\n'),
           dependsOn: ['understand'],
           gate: {
@@ -1848,5 +1849,6 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
 
   // --- Start MCP protocol loop ---
   process.stderr.write('[squad-mcp] Squad MCP server ready (waiting for Copilot)\n');
+  mcp.onClose(shutdown);
   await mcp.start();
 }

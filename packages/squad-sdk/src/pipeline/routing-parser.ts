@@ -101,10 +101,14 @@ export function isValidRoutingResponse(output: unknown): boolean {
 
   try {
     const parsed = JSON.parse(jsonStr);
+    // Reject if coordinator picked itself as implementer
+    if (parsed.implementer?.toLowerCase() === 'coordinator') return false;
     // Single-agent format: implementer required, reviewer optional
     if (parsed.implementer) return true;
     // Multi-subtask format: subtasks required, reviewer optional
     if (Array.isArray(parsed.subtasks) && parsed.subtasks.length > 0) {
+      // Reject if any subtask is assigned to coordinator
+      if (parsed.subtasks.some((s: Record<string, unknown>) => (s.agent as string)?.toLowerCase() === 'coordinator')) return false;
       return parsed.subtasks.every((s: Record<string, unknown>) => s.agent && s.task);
     }
     return false;
