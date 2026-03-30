@@ -125,6 +125,12 @@ export function isValidRoutingResponse(output: unknown): boolean {
  * Resilient parsing: extracts JSON from markdown code blocks, ignores surrounding prose.
  */
 export function parseRoutingDecision(output: string): RoutingDecision | null {
+  // Infrastructure agents that must never be routed as implementers or reviewers.
+  // These agents have special roles in the pipeline (routing, understanding, analysis)
+  // and get unrestricted VS Code tools when used as implementers — bypassing our
+  // tool restrictions since Copilot injects file/terminal tools at the session level.
+  const FORBIDDEN_IMPLEMENTERS = new Set(['coordinator', 'ben', 'sage', 'scribe']);
+
   const jsonStr = extractJSON(output);
   if (!jsonStr) return null;
 
@@ -132,21 +138,35 @@ export function parseRoutingDecision(output: string): RoutingDecision | null {
     const parsed = JSON.parse(jsonStr);
 
     if (Array.isArray(parsed.subtasks) && parsed.subtasks.length > 0) {
-      return {
-        kind: 'multi',
-        subtasks: parsed.subtasks.map((s: Record<string, unknown>) => ({
+      const subtasks = parsed.subtasks
+        .map((s: Record<string, unknown>) => ({
           agent: String(s.agent).toLowerCase(),
           task: String(s.task),
-        })),
-        reviewer: parsed.reviewer ? String(parsed.reviewer).toLowerCase() : null,
+        }))
+        .filter((s: { agent: string }) => !FORBIDDEN_IMPLEMENTERS.has(s.agent));
+
+      if (subtasks.length === 0) return null; // All subtasks were forbidden agents
+
+      const reviewer = parsed.reviewer ? String(parsed.reviewer).toLowerCase() : null;
+      return {
+        kind: 'multi',
+        subtasks,
+        reviewer: reviewer && !FORBIDDEN_IMPLEMENTERS.has(reviewer) ? reviewer : null,
       };
     }
 
     if (parsed.implementer) {
+      const implementer = String(parsed.implementer).toLowerCase();
+      if (FORBIDDEN_IMPLEMENTERS.has(implementer)) {
+        process.stderr.write(`[squad] Routing rejected: coordinator tried to route to forbidden agent "${implementer}"\n`);
+        return null; // Force re-route or fallback
+      }
+
+      const reviewer = parsed.reviewer ? String(parsed.reviewer).toLowerCase() : null;
       return {
         kind: 'single',
-        implementer: String(parsed.implementer).toLowerCase(),
-        reviewer: parsed.reviewer ? String(parsed.reviewer).toLowerCase() : null,
+        implementer,
+        reviewer: reviewer && !FORBIDDEN_IMPLEMENTERS.has(reviewer) ? reviewer : null,
       };
     }
 
