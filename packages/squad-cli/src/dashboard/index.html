@@ -119,7 +119,7 @@
       <div class="input-bar" id="sendBar" style="display:none">
         <input type="text" id="sendMsg" placeholder="Send follow-up message..." onkeydown="if(event.key==='Enter')doSend()">
         <button class="btn primary" onclick="doSend()">Send</button>
-        <button class="btn danger" onclick="doClose(selectedAgent)">Close</button>
+        <button class="btn danger" onclick="doClose(selectedAgentName)">Close</button>
       </div>
     </div>
   </div>
@@ -440,7 +440,7 @@
       msgCache[selectedAgent].push({ role: 'user', content: msg, timestamp: new Date().toISOString() });
       renderDetail();
       try {
-        const r = await fetch('/api/send', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({agentName:selectedAgent,message:msg}) });
+        const r = await fetch('/api/send', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({agentName:selectedAgentName,message:msg}) });
         const d = await r.json();
         if (r.ok && d.response) {
           msgCache[selectedAgent].push({ role: 'assistant', content: d.response, timestamp: new Date().toISOString() });
