@@ -1806,9 +1806,13 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             const { agentName, message } = JSON.parse(body);
             if (!agentName || !message) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agentName and message required' })); return; }
             const mgr = server.getSessionManager();
-            const response = await mgr?.sendFollowUp(agentName, message);
+            if (!mgr) { res.writeHead(500, cors); res.end(JSON.stringify({ error: 'Server not ready' })); return; }
+
+            // Fire-and-forget: queue message for agent, return immediately
+            mgr.sendFollowUp(agentName, message).catch(() => { /* fire-and-forget */ });
+
             res.writeHead(200, cors);
-            res.end(JSON.stringify({ sent: true, agentName, response }));
+            res.end(JSON.stringify({ sent: true, agentName, queued: true }));
           } catch (err) {
             res.writeHead(500, cors);
             res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
