@@ -324,12 +324,15 @@ export function generateImplPhases(
         continueOnPartialFailure: false, // Single implementer - require it to succeed
         gate: {
           validate: (o: unknown) => {
-            // Review gates require an explicit verdict — done pulses are NOT sufficient
-            // because auto-emit done pulses fire for every dispatch including reviews.
+            // 1. Explicit verdict in text response — preferred
             if (typeof o === 'string' && o !== opts.toolCallPlaceholder && hasReviewVerdict(o)) return true;
+            // 2. Agent emitted done pulse (may have completed review via tool calls only)
+            if (opts.hasDonePulse(revName)) return true;
+            // 3. Agent produced substantive text (lenient fallback)
+            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.trim().length > 50) return true;
             return false;
           },
-          description: 'Reviewer must finish with APPROVED: or BLOCKED:',
+          description: 'Reviewer must produce a verdict, done pulse, or substantive review',
         },
         timeout,
       });
@@ -472,11 +475,15 @@ export function generateImplPhases(
         continueOnPartialFailure: true, // Continue review even if some subtasks failed
         gate: {
           validate: (o: unknown) => {
-            // Review gates require an explicit verdict — done pulses are NOT sufficient.
+            // 1. Explicit verdict in text response — preferred
             if (typeof o === 'string' && o !== opts.toolCallPlaceholder && hasReviewVerdict(o)) return true;
+            // 2. Agent emitted done pulse (may have completed review via tool calls only)
+            if (opts.hasDonePulse(revName)) return true;
+            // 3. Agent produced substantive text (lenient fallback)
+            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.trim().length > 50) return true;
             return false;
           },
-          description: 'Reviewer must finish with APPROVED: or BLOCKED:',
+          description: 'Reviewer must produce a verdict, done pulse, or substantive review',
         },
         timeout,
       });

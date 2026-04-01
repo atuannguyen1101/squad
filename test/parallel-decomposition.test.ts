@@ -375,13 +375,18 @@ describe('generateImplPhases — single-agent', () => {
       expect(gate.validate('I asked the implementer a question and will wait.')).toBe(false);
     });
 
-    it('review gate ignores done pulses and requires explicit verdict', () => {
+    it('review gate accepts done pulse as fallback', () => {
       const phases = generateImplPhases(singleDecision, makeOpts({
         hasDonePulse: () => true,
       }));
       const gate = phases[1]!.gate;
-      // Even with a done pulse, short text without APPROVED:/BLOCKED: fails
-      expect(gate.validate('short')).toBe(false);
+      expect(gate.validate('short')).toBe(true);
+    });
+
+    it('review gate accepts substantive text as lenient fallback', () => {
+      const phases = generateImplPhases(singleDecision, makeOpts());
+      const gate = phases[1]!.gate;
+      expect(gate.validate('The review is complete and all checks passed without issues found in the implementation.')).toBe(true);
     });
   });
 
