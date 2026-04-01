@@ -36,7 +36,7 @@ function makeOpts(overrides: Partial<PhaseGeneratorOptions> = {}): PhaseGenerato
 function makePipelineDeps(): PipelineRunnerDeps {
   return {
     dispatch: vi.fn().mockResolvedValue({ sessionId: 's', status: 'success', agentName: 'test' }),
-    waitForResponse: vi.fn().mockResolvedValue('done — substantial output here'),
+    waitForResponse: vi.fn().mockResolvedValue('APPROVED: done — substantial output here'),
     onPhaseStart: vi.fn(),
     onPhaseComplete: vi.fn(),
     onPipelineComplete: vi.fn(),
@@ -316,34 +316,72 @@ describe('generateImplPhases — single-agent', () => {
   it('review task references implementer agent for session reading', () => {
     const phases = generateImplPhases(singleDecision, makeOpts());
     expect(phases[1]?.task).toContain('fenster');
+    expect(phases[1]?.task).toContain('squad_list_handoffs');
+    expect(phases[1]?.task).toContain('squad_read_handoff');
+    expect(phases[1]?.task).toContain('squad_scratchpad_read');
     expect(phases[1]?.task).toContain('squad_read_session');
+    expect(phases[1]?.task).toContain('wait for the direct reply before finishing the review');
+    expect(phases[1]?.task).toContain('APPROVED:');
+    expect(phases[1]?.task).toContain('BLOCKED:');
+  });
+
+  it('implement task instructs publishing a structured handoff when reviewer exists', () => {
+    const phases = generateImplPhases(singleDecision, makeOpts());
+    expect(phases[0]?.task).toContain('squad_publish_handoff');
+    expect(phases[0]?.task).toContain('hockney');
+    expect(phases[0]?.task).toContain('Do NOT use squad_route to wake the reviewer');
+  });
+
+  it('implement task prefers structured handoffs even without reviewer', () => {
+    const noReviewDecision: RoutingDecision = {
+      kind: 'single',
+      implementer: 'fenster',
+      reviewer: null,
+    };
+    const phases = generateImplPhases(noReviewDecision, makeOpts());
+    expect(phases[0]?.task).toContain('squad_publish_handoff');
   });
 
   describe('gate validation', () => {
-    it('implement gate accepts substantial text output', () => {
+    it('implement gate accepts substantial text output', async () => {
       const phases = generateImplPhases(singleDecision, makeOpts());
       const gate = phases[0]!.gate;
-      expect(gate.validate('x'.repeat(51))).toBe(true);
+      await expect(gate.validate('x'.repeat(51))).resolves.toBe(true);
     });
 
-    it('implement gate rejects tool call placeholder', () => {
+    it('implement gate rejects tool call placeholder', async () => {
       const phases = generateImplPhases(singleDecision, makeOpts());
       const gate = phases[0]!.gate;
-      expect(gate.validate('__TOOL_CALL__')).toBe(false);
+      await expect(gate.validate('__TOOL_CALL__')).resolves.toBe(false);
     });
 
-    it('implement gate accepts done pulse', () => {
+    it('implement gate accepts done pulse', async () => {
       const phases = generateImplPhases(singleDecision, makeOpts({
         hasDonePulse: (name) => name === 'fenster',
       }));
       const gate = phases[0]!.gate;
-      expect(gate.validate('short')).toBe(true);
+      await expect(gate.validate('short')).resolves.toBe(true);
     });
 
-    it('review gate accepts substantive text', () => {
+    it('review gate accepts explicit verdict text', () => {
       const phases = generateImplPhases(singleDecision, makeOpts());
       const gate = phases[1]!.gate;
-      expect(gate.validate('Approved. Looks good.')).toBe(true);
+      expect(gate.validate('APPROVED: Looks good.')).toBe(true);
+    });
+
+    it('review gate rejects in-progress review text without a verdict', () => {
+      const phases = generateImplPhases(singleDecision, makeOpts());
+      const gate = phases[1]!.gate;
+      expect(gate.validate('I asked the implementer a question and will wait.')).toBe(false);
+    });
+
+    it('review gate ignores done pulses and requires explicit verdict', () => {
+      const phases = generateImplPhases(singleDecision, makeOpts({
+        hasDonePulse: () => true,
+      }));
+      const gate = phases[1]!.gate;
+      // Even with a done pulse, short text without APPROVED:/BLOCKED: fails
+      expect(gate.validate('short')).toBe(false);
     });
   });
 
@@ -431,15 +469,23 @@ describe('generateImplPhases — multi-subtask', () => {
     const phases = generateImplPhases(multiDecision, makeOpts());
     expect(phases[0]?.task).toContain('working in parallel');
     expect(phases[0]?.task).toContain('squad_scratchpad_write');
+    expect(phases[0]?.task).toContain('squad_publish_handoff');
     expect(phases[1]?.task).toContain('Avoid modifying files');
+    expect(phases[0]?.task).toContain('Do NOT use squad_route to wake the reviewer');
   });
 
-  it('review phase references all subtask agents for session reading', () => {
+  it('review phase references all subtask agents for structured handoff reading', () => {
     const phases = generateImplPhases(multiDecision, makeOpts());
     const review = phases.find(p => p.id === 'review');
     expect(review?.task).toContain('fenster');
     expect(review?.task).toContain('eecom');
+    expect(review?.task).toContain('squad_list_handoffs');
+    expect(review?.task).toContain('squad_read_handoff');
+    expect(review?.task).toContain('squad_scratchpad_read');
     expect(review?.task).toContain('squad_read_session');
+    expect(review?.task).toContain('wait for the direct reply before finishing the review');
+    expect(review?.task).toContain('APPROVED:');
+    expect(review?.task).toContain('BLOCKED:');
   });
 
   it('review phase instructs checking for file conflicts', () => {
@@ -457,26 +503,26 @@ describe('generateImplPhases — multi-subtask', () => {
   });
 
   describe('gate validation', () => {
-    it('each subtask gate checks its own agent for done pulse', () => {
+    it('each subtask gate checks its own agent for done pulse', async () => {
       const donePulses = new Set(['fenster']);
       const phases = generateImplPhases(multiDecision, makeOpts({
         hasDonePulse: (name) => donePulses.has(name),
       }));
       // fenster (implement-0) has a done pulse → gate passes on short text
-      expect(phases[0]!.gate.validate('short')).toBe(true);
+      await expect(phases[0]!.gate.validate('short')).resolves.toBe(true);
       // eecom (implement-1) does NOT have a done pulse → gate fails on short text
-      expect(phases[1]!.gate.validate('short')).toBe(false);
+      await expect(phases[1]!.gate.validate('short')).resolves.toBe(false);
     });
 
-    it('subtask gate accepts substantial text regardless of pulse', () => {
+    it('subtask gate accepts substantial text regardless of pulse', async () => {
       const phases = generateImplPhases(multiDecision, makeOpts());
-      expect(phases[0]!.gate.validate('x'.repeat(51))).toBe(true);
-      expect(phases[1]!.gate.validate('x'.repeat(51))).toBe(true);
+      await expect(phases[0]!.gate.validate('x'.repeat(51))).resolves.toBe(true);
+      await expect(phases[1]!.gate.validate('x'.repeat(51))).resolves.toBe(true);
     });
 
-    it('subtask gate rejects tool call placeholder', () => {
+    it('subtask gate rejects tool call placeholder', async () => {
       const phases = generateImplPhases(multiDecision, makeOpts());
-      expect(phases[0]!.gate.validate('__TOOL_CALL__')).toBe(false);
+      await expect(phases[0]!.gate.validate('__TOOL_CALL__')).resolves.toBe(false);
     });
   });
 

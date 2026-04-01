@@ -61,6 +61,7 @@ export interface PipelineRunnerDeps {
   waitForResponse: (agentName: string, timeoutMs: number) => Promise<string | null>;
   onPhaseStart?: (phaseId: string, agent: string) => void;
   onPhaseComplete?: (result: PhaseResult) => void;
+  onPhaseRetry?: (phaseId: string, agent: string, attempt: number, gateDescription: string) => void;
   onPipelineComplete?: (state: PipelineState) => void;
 }
 

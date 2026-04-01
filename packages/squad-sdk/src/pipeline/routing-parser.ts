@@ -53,8 +53,11 @@ export interface PhaseGeneratorOptions {
    * Sentinel string for tool-call placeholder responses.
    * Outputs matching this string are not considered substantial.
    */
-  toolCallPlaceholder: string;
-  /** Per-phase timeout in ms (default: 300_000) */
+  toolCallPlaceholder: string;  /**
+   * Load the response checklist for an agent (from .squad/agents/{name}/response-checklist.md).
+   * Returns an array of required substrings, or null if no checklist exists.
+   */
+  getResponseChecklist?: (agentName: string) => string[] | null;  /** Per-phase timeout in ms (default: 300_000) */
   timeout?: number;
   /**
    * Whether this is "throwaway work" (no git commits).
@@ -62,6 +65,10 @@ export interface PhaseGeneratorOptions {
    * Only affects git operations (commit, PR, ADO creation).
    */
   isThrowawayWork?: boolean;
+}
+
+function hasReviewVerdict(output: string): boolean {
+  return /(?:^|\n)(APPROVED|BLOCKED):/i.test(output);
 }
 
 // ─── Parsing ────────────────────────────────────────────────────────────────
@@ -191,7 +198,8 @@ export function parseRoutingDecision(output: string): RoutingDecision | null {
  * 
  * IMPORTANT: Review phases ARE created when a reviewer is specified. The review
  * phase will be executed after all implementation phases complete. The reviewer
- * is instructed to use squad_read_session to inspect the implementer's work.
+ * is instructed to use structured handoffs first, then fall back to
+ * squad_read_session only when the handoff is missing or incomplete.
  */
 export function generateImplPhases(
   decision: RoutingDecision,
@@ -222,17 +230,41 @@ export function generateImplPhases(
           : 'After completing the work, commit your changes to git if appropriate.',
         '',
         'Write code, add tests, and verify the build passes.',
+        revName
+          ? [
+              `Before signaling done, publish a structured handoff to ${revName} with squad_publish_handoff.`,
+              'Include: summary of changes, verification performed, blockers, and any scratchpad artifact keys the reviewer must read.',
+              'If you create supporting review artifacts, write them with squad_scratchpad_write and reference those keys in the handoff.',
+                'Do NOT use squad_route to wake the reviewer. Publishing the handoff is enough — the pipeline starts the review phase automatically.',
+            ].join('\n')
+          : 'If your work would help downstream agents, prefer squad_publish_handoff over burying key results in freeform chat.',
+        '',
         'Use squad_pulse to report progress at milestones.',
         'When done, emit squad_pulse with phase "done" listing the files you created or modified.',
       ].join('\n'),
       gate: {
         validate: async (o: unknown) => {
           // GATE FALLBACK CASCADE (resilient to missing pulses):
-          // 1. Agent emitted "done" pulse? → Pass
-          if (opts.hasDonePulse(implName)) return true;
+          // 1. Agent emitted "done" pulse? → Check response checklist if it exists
+          if (opts.hasDonePulse(implName)) {
+            // Even with done pulse, enforce response checklist if present
+            const checklist = opts.getResponseChecklist?.(implName);
+            if (checklist && typeof o === 'string') {
+              const missing = checklist.filter(req => !o.includes(req));
+              if (missing.length > 0) return false;
+            }
+            return true;
+          }
           
-          // 2. Agent produced non-empty assistant response? → Pass (fallback for agents that don't emit pulses)
+          // 2. Agent produced non-empty assistant response? → Check checklist then pass
           if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.trim().length > 0) {
+            // Enforce response checklist BEFORE any other checks
+            const checklist = opts.getResponseChecklist?.(implName);
+            if (checklist) {
+              const missing = checklist.filter(req => !o.includes(req));
+              if (missing.length > 0) return false;
+            }
+
             // Check if this is a planner/lead/orchestrator role - accept planning output
             const isPlanner = opts.isPlannerRole?.(implName) ?? false;
             if (isPlanner && o.length > 50) {
@@ -277,23 +309,27 @@ export function generateImplPhases(
         task: [
           `Review the implementation for: ${opts.message}`,
           '',
-          `Use squad_read_session to read ${implName}'s session and see what was built.`,
+          `First use squad_list_handoffs to find handoffs from ${implName} addressed to ${revName}.`,
+          'Use squad_read_handoff to read the structured handoff details.',
+          'If the handoff references scratchpad artifact keys, read them with squad_scratchpad_read before reviewing.',
+          `Use squad_read_session to inspect ${implName}'s transcript only if the handoff is missing or incomplete.`,
+          'If you ask the implementer a direct question with squad_send, wait for the direct reply before finishing the review.',
+          'Do not finish the review immediately after sending a question or while you are still waiting.',
+          'If the original request requires a final handoff or summary artifact, publish it before finishing the review.',
           'Check: code quality, test coverage, pattern consistency, type safety.',
+          'Finish your final review response with either "APPROVED:" or "BLOCKED:" followed by a short reason.',
           'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
         ].join('\n'),
         dependsOn: ['implement'],
         continueOnPartialFailure: false, // Single implementer - require it to succeed
         gate: {
           validate: (o: unknown) => {
-            // GATE FALLBACK CASCADE for review:
-            // 1. Agent emitted "done" pulse? → Pass
-            if (opts.hasDonePulse(revName)) return true;
-            // 2. Agent produced non-empty review? → Pass
-            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.trim().length > 20) return true;
-            // 3. No pulse + no review → Reject
+            // Review gates require an explicit verdict — done pulses are NOT sufficient
+            // because auto-emit done pulses fire for every dispatch including reviews.
+            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && hasReviewVerdict(o)) return true;
             return false;
           },
-          description: 'Reviewer must emit a done pulse OR produce substantive review',
+          description: 'Reviewer must finish with APPROVED: or BLOCKED:',
         },
         timeout,
       });
@@ -302,6 +338,7 @@ export function generateImplPhases(
     // Multi-subtask: parallel implement phases + optional review phase
     const implementPhaseIds: string[] = [];
     const subtaskAgents: string[] = [];
+    const revName = decision.reviewer;
 
     for (let i = 0; i < decision.subtasks.length; i++) {
       const subtask = decision.subtasks[i]!;
@@ -333,17 +370,39 @@ export function generateImplPhases(
             : 'After completing the work, commit your changes to git if appropriate.',
           '',
           'Write code, add tests, and verify the build passes.',
+          revName
+            ? [
+                `Before signaling done, publish a structured handoff to ${revName} with squad_publish_handoff.`,
+                'Include: what your subtask changed, verification performed, blockers, and any scratchpad artifact keys the reviewer must read.',
+                'Do NOT use squad_route to wake the reviewer. Publishing the handoff is enough — the pipeline starts the review phase automatically.',
+              ].join('\n')
+            : 'If another agent may need your subtask output, prefer squad_publish_handoff over burying it in freeform chat.',
+          '',
           'Use squad_pulse to report progress at milestones.',
           'When done, emit squad_pulse with phase "done" listing the files you created or modified.',
         ].join('\n'),
         gate: {
           validate: ((agentName: string) => async (o: unknown) => {
             // GATE FALLBACK CASCADE (resilient to missing pulses):
-            // 1. Agent emitted "done" pulse? → Pass
-            if (opts.hasDonePulse(agentName)) return true;
+            // 1. Agent emitted "done" pulse? → Check response checklist if it exists
+            if (opts.hasDonePulse(agentName)) {
+              const checklist = opts.getResponseChecklist?.(agentName);
+              if (checklist && typeof o === 'string') {
+                const missing = checklist.filter(req => !o.includes(req));
+                if (missing.length > 0) return false;
+              }
+              return true;
+            }
             
-            // 2. Agent produced non-empty assistant response? → Pass (fallback for agents that don't emit pulses)
+            // 2. Agent produced non-empty assistant response? → Check checklist then pass
             if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.trim().length > 0) {
+              // Enforce response checklist BEFORE any other checks
+              const checklist = opts.getResponseChecklist?.(agentName);
+              if (checklist) {
+                const missing = checklist.filter(req => !o.includes(req));
+                if (missing.length > 0) return false;
+              }
+
               // Check if this is a planner/lead/orchestrator role - accept planning output
               const isPlanner = opts.isPlannerRole?.(agentName) ?? false;
               if (isPlanner && o.length > 50) {
@@ -382,10 +441,9 @@ export function generateImplPhases(
     }
 
     // Only add review phase if reviewer is present
-    const revName = decision.reviewer;
     if (revName) {
       const sessionReadInstructions = subtaskAgents
-        .map(a => `- Use squad_read_session to read ${a}'s session`)
+        .map(a => `- Look for structured handoffs from ${a} using squad_list_handoffs, then read them with squad_read_handoff`)
         .join('\n');
 
       phases.push({
@@ -398,20 +456,27 @@ export function generateImplPhases(
           ...decision.subtasks.map(s => `- ${s.agent}: ${s.task}`),
           '',
           sessionReadInstructions,
+          '- Read any referenced artifact keys with squad_scratchpad_read before reviewing.',
+          '- Use squad_read_session only if a required handoff is missing or incomplete.',
+          '- If you ask an implementer a direct question with squad_send, wait for the direct reply before finishing the review.',
+          '- Do not finish the review immediately after sending a question or while you are still waiting.',
+          '- If the original request requires a final handoff or summary artifact, publish it before finishing the review.',
           '',
           'NOTE: Some subtasks may have failed. Review the work that was completed.',
           'Check: code quality, test coverage, pattern consistency, type safety.',
           'IMPORTANT: Check for file conflicts between parallel agents — look for overlapping edits to the same files.',
+          'Finish your final review response with either "APPROVED:" or "BLOCKED:" followed by a short reason.',
           'Emit squad_pulse with phase "done" if approved or "blocked" with specific issues.',
         ].join('\n'),
         dependsOn: implementPhaseIds,
         continueOnPartialFailure: true, // Continue review even if some subtasks failed
         gate: {
           validate: (o: unknown) => {
-            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && o.length > 20) return true;
-            return opts.hasDonePulse(revName);
+            // Review gates require an explicit verdict — done pulses are NOT sufficient.
+            if (typeof o === 'string' && o !== opts.toolCallPlaceholder && hasReviewVerdict(o)) return true;
+            return false;
           },
-          description: 'Reviewer must produce a substantive review or emit a done pulse',
+          description: 'Reviewer must finish with APPROVED: or BLOCKED:',
         },
         timeout,
       });

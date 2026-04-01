@@ -12,6 +12,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ToolRegistry, defineTool, type RouteRequest, type DecisionRecord, type MemoryEntry, type ProposalActionRequest } from '@bradygaster/squad-sdk/tools';
 import { SessionPool } from '@bradygaster/squad-sdk/client';
+import { HandoffStore } from '../packages/squad-sdk/src/handoff/index.js';
+import { Scratchpad } from '../packages/squad-sdk/src/scratchpad/index.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -60,6 +62,28 @@ describe('defineTool', () => {
       resultType: 'success',
     });
   });
+
+  it('should forward invocation metadata to handlers', async () => {
+    const seen: Array<{ sessionId: string; toolCallId: string }> = [];
+    const tool = defineTool({
+      name: 'capture_invocation',
+      description: 'Capture invocation metadata',
+      parameters: { type: 'object' },
+      handler: async (_args: { message: string }, invocation) => {
+        seen.push({ sessionId: invocation.sessionId, toolCallId: invocation.toolCallId });
+        return { textResultForLlm: 'ok', resultType: 'success' as const };
+      },
+    });
+
+    await tool.handler({ message: 'hello' }, {
+      sessionId: 'session-123',
+      toolCallId: 'call-456',
+      toolName: 'capture_invocation',
+      arguments: { message: 'hello' },
+    });
+
+    expect(seen).toEqual([{ sessionId: 'session-123', toolCallId: 'call-456' }]);
+  });
 });
 
 describe('ToolRegistry', () => {
@@ -80,7 +104,7 @@ describe('ToolRegistry', () => {
   describe('registration', () => {
     it('should register all squad tools', () => {
       const tools = registry.getTools();
-      expect(tools.length).toBe(12);
+      expect(tools.length).toBe(16);
 
       const toolNames = tools.map(t => t.name);
       expect(toolNames).toContain('squad_route');
@@ -94,7 +118,11 @@ describe('ToolRegistry', () => {
       expect(toolNames).toContain('squad_scratchpad_write');
       expect(toolNames).toContain('squad_scratchpad_read');
       expect(toolNames).toContain('squad_scratchpad_list');
+      expect(toolNames).toContain('squad_publish_handoff');
+      expect(toolNames).toContain('squad_read_handoff');
+      expect(toolNames).toContain('squad_list_handoffs');
       expect(toolNames).toContain('squad_proposals');
+      expect(toolNames).toContain('squad_mcp_call');
     });
 
     it('should register tools with descriptions and parameters', () => {
@@ -110,7 +138,7 @@ describe('ToolRegistry', () => {
     it('should return all registered tools', () => {
       const tools = registry.getTools();
       expect(Array.isArray(tools)).toBe(true);
-      expect(tools.length).toBe(12);
+      expect(tools.length).toBe(16);
     });
 
     it('should return tools with handler functions', () => {
@@ -124,7 +152,7 @@ describe('ToolRegistry', () => {
   describe('getToolsForAgent', () => {
     it('should return all tools when no filter provided', () => {
       const tools = registry.getToolsForAgent();
-      expect(tools.length).toBe(12);
+      expect(tools.length).toBe(16);
     });
 
     it('should filter tools by allowed list', () => {
@@ -227,6 +255,446 @@ describe('squad_route handler', () => {
       resultType: 'success',
     });
     expect((result as any).toolTelemetry.routeRequest.priority).toBe('normal');
+  });
+
+  it('should route within the caller run when session context is available', async () => {
+    const mockDispatch = vi.fn().mockResolvedValue({
+      sessionId: 'target-session',
+      status: 'created_and_sent',
+    });
+
+    registry = new ToolRegistry(
+      '.test-squad-route-run-aware',
+      undefined,
+      () => mockDispatch,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => (_sessionId: string) => ({ agentName: 'ben', runId: 'run-123' }),
+    );
+
+    const tool = registry.getTool('squad_route')!;
+    await tool.handler(
+      { targetAgent: 'fenster', task: 'Implement feature X' } as RouteRequest,
+      {
+        sessionId: 'source-session',
+        toolCallId: 'test-call',
+        toolName: 'squad_route',
+        arguments: {},
+      }
+    );
+
+    expect(mockDispatch).toHaveBeenCalledWith('fenster', 'Implement feature X', undefined, 'run-123');
+  });
+
+  it('should include handoff and artifact references in routed context', async () => {
+    const mockDispatch = vi.fn().mockResolvedValue({
+      sessionId: 'target-session',
+      status: 'created_and_sent',
+    });
+
+    registry = new ToolRegistry(
+      '.test-squad-route-handoffs',
+      undefined,
+      () => mockDispatch,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => (_sessionId: string) => ({ agentName: 'ben', runId: 'run-123' }),
+    );
+
+    const tool = registry.getTool('squad_route')!;
+    await tool.handler(
+      {
+        targetAgent: 'fenster',
+        task: 'Review the patch',
+        handoffIds: ['handoff-1'],
+        artifactKeys: ['builder:patch'],
+      } as RouteRequest,
+      {
+        sessionId: 'source-session',
+        toolCallId: 'test-call',
+        toolName: 'squad_route',
+        arguments: {},
+      }
+    );
+
+    expect(mockDispatch).toHaveBeenCalledWith(
+      'fenster',
+      'Review the patch',
+      expect.stringContaining('handoff-1'),
+      'run-123',
+    );
+    expect(mockDispatch.mock.calls[0]?.[2]).toContain('builder:patch');
+  });
+});
+
+describe('run-aware coordination tools', () => {
+  it('squad_send should stay within the caller run when session context is available', async () => {
+    const mockSend = vi.fn().mockResolvedValue('done');
+    const registry = new ToolRegistry(
+      '.test-squad-send-run-aware',
+      undefined,
+      undefined,
+      () => mockSend,
+      undefined,
+      undefined,
+      undefined,
+      () => (_sessionId: string) => ({ agentName: 'ben', runId: 'run-456' }),
+    );
+
+    const tool = registry.getTool('squad_send')!;
+    const result = await tool.handler(
+      { agentName: 'fenster', message: 'Status?' },
+      {
+        sessionId: 'source-session',
+        toolCallId: 'test-call',
+        toolName: 'squad_send',
+        arguments: {},
+      }
+    );
+
+    expect(mockSend).toHaveBeenCalledWith('fenster', 'Status?', 'run-456', 'ben');
+    expect(result).toMatchObject({ resultType: 'success', textResultForLlm: 'done' });
+  });
+
+  it('squad_read_session should stay within the caller run when session context is available', async () => {
+    const mockGetMessages = vi.fn().mockReturnValue([
+      { role: 'assistant', content: 'done', timestamp: '2026-03-31T12:00:00.000Z' },
+    ]);
+    const registry = new ToolRegistry(
+      '.test-squad-read-run-aware',
+      undefined,
+      undefined,
+      undefined,
+      () => mockGetMessages,
+      undefined,
+      undefined,
+      () => (_sessionId: string) => ({ agentName: 'ben', runId: 'run-789' }),
+    );
+
+    const tool = registry.getTool('squad_read_session')!;
+    const result = await tool.handler(
+      { agentName: 'fenster' },
+      {
+        sessionId: 'source-session',
+        toolCallId: 'test-call',
+        toolName: 'squad_read_session',
+        arguments: {},
+      }
+    );
+
+    expect(mockGetMessages).toHaveBeenCalledWith('fenster', 'run-789');
+    expect(result).toMatchObject({ resultType: 'success' });
+    expect((result as any).textResultForLlm).toContain('Session history for fenster');
+  });
+
+  it('scratchpad tools should isolate entries by caller run when session context is available', async () => {
+    const runPads = new Map<string, Scratchpad>([
+      ['run-a', new Scratchpad()],
+      ['run-b', new Scratchpad()],
+    ]);
+    const registry = new ToolRegistry(
+      '.test-scratchpad-run-aware',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => (sessionId: string) => ({ agentName: 'ben', runId: sessionId === 'session-a' ? 'run-a' : 'run-b' }),
+      () => (runId?: string) => (runId ? runPads.get(runId) ?? null : null),
+    );
+
+    const writeTool = registry.getTool('squad_scratchpad_write')!;
+    const listTool = registry.getTool('squad_scratchpad_list')!;
+
+    await writeTool.handler(
+      { key: 'ben:summary', value: 'run-a artifact', producer: 'ben' },
+      {
+        sessionId: 'session-a',
+        toolCallId: 'call-write',
+        toolName: 'squad_scratchpad_write',
+        arguments: {},
+      }
+    );
+
+    const runAList = await listTool.handler(
+      {},
+      {
+        sessionId: 'session-a',
+        toolCallId: 'call-list-a',
+        toolName: 'squad_scratchpad_list',
+        arguments: {},
+      }
+    );
+
+    const runBList = await listTool.handler(
+      {},
+      {
+        sessionId: 'session-b',
+        toolCallId: 'call-list-b',
+        toolName: 'squad_scratchpad_list',
+        arguments: {},
+      }
+    );
+
+    expect((runAList as any).textResultForLlm).toContain('ben:summary');
+    expect((runBList as any).textResultForLlm).toContain('Scratchpad is empty');
+  });
+
+  it('handoff tools should publish, list, and read entries within the caller run', async () => {
+    const runStores = new Map<string, HandoffStore>([
+      ['run-a', new HandoffStore()],
+      ['run-b', new HandoffStore()],
+    ]);
+    const registry = new ToolRegistry(
+      '.test-handoff-run-aware',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => (sessionId: string) => ({ agentName: sessionId === 'session-a' ? 'builder' : 'reviewer', runId: sessionId === 'session-a' ? 'run-a' : 'run-b' }),
+      undefined,
+      () => (runId?: string) => (runId ? runStores.get(runId) ?? null : null),
+    );
+
+    const publishTool = registry.getTool('squad_publish_handoff')!;
+    const listTool = registry.getTool('squad_list_handoffs')!;
+    const readTool = registry.getTool('squad_read_handoff')!;
+
+    const publishResult = await publishTool.handler(
+      {
+        toAgent: 'reviewer',
+        kind: 'patch',
+        summary: 'Patch ready for review',
+        details: 'Read the patch and focus on auth edge cases.',
+        artifactKeys: ['builder:patch'],
+      },
+      {
+        sessionId: 'session-a',
+        toolCallId: 'call-publish',
+        toolName: 'squad_publish_handoff',
+        arguments: {},
+      }
+    );
+
+    const handoffId = (publishResult as any).toolTelemetry.handoffId as string;
+
+    const runAList = await listTool.handler(
+      { toAgent: 'reviewer' },
+      {
+        sessionId: 'session-a',
+        toolCallId: 'call-list-a',
+        toolName: 'squad_list_handoffs',
+        arguments: {},
+      }
+    );
+
+    const runBList = await listTool.handler(
+      { toAgent: 'reviewer' },
+      {
+        sessionId: 'session-b',
+        toolCallId: 'call-list-b',
+        toolName: 'squad_list_handoffs',
+        arguments: {},
+      }
+    );
+
+    const readResult = await readTool.handler(
+      { handoffId },
+      {
+        sessionId: 'session-a',
+        toolCallId: 'call-read-a',
+        toolName: 'squad_read_handoff',
+        arguments: {},
+      }
+    );
+
+    expect((runAList as any).textResultForLlm).toContain(handoffId);
+    expect((runBList as any).textResultForLlm).toContain('No handoffs found');
+    expect((readResult as any).textResultForLlm).toContain('Patch ready for review');
+    expect((readResult as any).textResultForLlm).toContain('builder:patch');
+  });
+
+  it('squad_status should inspect a target run for built-in actors', async () => {
+    const runPads = new Map<string, Scratchpad>([['run-123', new Scratchpad()]]);
+    runPads.get('run-123')!.write('eecom:artifact', 'expected-value', 'eecom');
+    const runStores = new Map<string, HandoffStore>([['run-123', new HandoffStore()]]);
+    runStores.get('run-123')!.publish({
+      runId: 'run-123',
+      fromAgent: 'eecom',
+      toAgent: 'hockney',
+      kind: 'patch',
+      summary: 'Patch ready',
+      details: 'Review the patch',
+      artifactKeys: ['eecom:artifact'],
+    });
+
+    const registry = new ToolRegistry(
+      '.test-run-inspection',
+      undefined,
+      undefined,
+      undefined,
+      () => (agentName: string, runId?: string) => runId === 'run-123'
+        ? [{ role: 'assistant', content: `${agentName} output`, timestamp: '2026-03-31T00:00:00.000Z' }]
+        : [],
+      undefined,
+      undefined,
+      () => (_sessionId: string) => ({ agentName: 'ben', runId: 'inspection-run' }),
+      () => (runId?: string) => (runId ? runPads.get(runId) ?? null : null),
+      () => (runId?: string) => (runId ? runStores.get(runId) ?? null : null),
+      () => (runId: string) => runId === 'run-123'
+        ? [
+            { agentName: 'eecom', sessionId: 'session-1-12345678' },
+            { agentName: 'hockney', sessionId: 'session-2-12345678' },
+          ]
+        : [],
+      undefined,
+      () => (runId: string) => runId === 'run-123'
+        ? [
+            { summary: 'eecom routed work to hockney', type: 'session:tool_call', agentName: 'eecom' },
+            { summary: 'hockney read handoff handoff-1', type: 'session:tool_call', agentName: 'hockney' },
+          ]
+        : [],
+    );
+
+    const tool = registry.getTool('squad_status')!;
+    const result = await tool.handler(
+      { runId: 'run-123', verbose: true },
+      {
+        sessionId: 'inspector-session',
+        toolCallId: 'call-status',
+        toolName: 'squad_status',
+        arguments: {},
+      },
+    );
+
+    expect((result as any).resultType).toBe('success');
+    expect((result as any).textResultForLlm).toContain('Run run-123 inspection');
+    expect((result as any).textResultForLlm).toContain('eecom:artifact');
+    expect((result as any).textResultForLlm).toContain('Patch ready');
+    expect((result as any).textResultForLlm).toContain('last assistant message: eecom output');
+    expect((result as any).textResultForLlm).toContain('Communication trace:');
+    expect((result as any).textResultForLlm).toContain('eecom routed work to hockney');
+  });
+
+  it('squad_status should reject cross-run inspection for non-built-in agents', async () => {
+    const registry = new ToolRegistry(
+      '.test-run-inspection-restricted',
+      undefined,
+      undefined,
+      undefined,
+      () => () => [],
+      undefined,
+      undefined,
+      () => (_sessionId: string) => ({ agentName: 'fenster', runId: 'run-a' }),
+      () => () => null,
+      () => () => null,
+      () => () => [],
+    );
+
+    const tool = registry.getTool('squad_status')!;
+    const result = await tool.handler(
+      { runId: 'run-b' },
+      {
+        sessionId: 'source-session',
+        toolCallId: 'call-status',
+        toolName: 'squad_status',
+        arguments: {},
+      },
+    );
+
+    expect((result as any).resultType).toBe('failure');
+    expect((result as any).textResultForLlm).toContain('Cross-run inspection is restricted');
+  });
+
+  it('should record communication events for collaboration tools', async () => {
+    const recordedEvents: Array<{ toolName: string; runId?: string }> = [];
+    const runPads = new Map<string, Scratchpad>([['run-1', new Scratchpad()]]);
+    const runStores = new Map<string, HandoffStore>([['run-1', new HandoffStore()]]);
+    const mockDispatch = vi.fn().mockResolvedValue({
+      sessionId: 'target-session',
+      status: 'created_and_sent',
+    });
+
+    const registry = new ToolRegistry(
+      '.test-communication-events',
+      undefined,
+      () => mockDispatch,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => (_sessionId: string) => ({ agentName: 'eecom', runId: 'run-1' }),
+      () => (runId?: string) => (runId ? runPads.get(runId) ?? null : null),
+      () => (runId?: string) => (runId ? runStores.get(runId) ?? null : null),
+      () => () => [{ agentName: 'eecom', sessionId: 'session-1' }],
+      () => async (event) => { recordedEvents.push({ toolName: event.toolName, runId: event.runId }); },
+      () => () => [],
+    );
+
+    const routeTool = registry.getTool('squad_route')!;
+    const publishTool = registry.getTool('squad_publish_handoff')!;
+    const readTool = registry.getTool('squad_read_handoff')!;
+    const scratchpadWrite = registry.getTool('squad_scratchpad_write')!;
+
+    await routeTool.handler(
+      { targetAgent: 'hockney', task: 'Review patch', handoffIds: ['handoff-1'], artifactKeys: ['eecom:artifact'] },
+      {
+        sessionId: 'source-session',
+        toolCallId: 'call-route',
+        toolName: 'squad_route',
+        arguments: {},
+      },
+    );
+
+    const publishResult = await publishTool.handler(
+      {
+        toAgent: 'hockney',
+        kind: 'patch',
+        summary: 'Patch ready',
+        details: 'Read the patch and verify auth behavior.',
+        artifactKeys: ['eecom:artifact'],
+      },
+      {
+        sessionId: 'source-session',
+        toolCallId: 'call-publish',
+        toolName: 'squad_publish_handoff',
+        arguments: {},
+      },
+    );
+
+    await scratchpadWrite.handler(
+      { key: 'eecom:artifact', value: 'patch-data', producer: 'eecom' },
+      {
+        sessionId: 'source-session',
+        toolCallId: 'call-write',
+        toolName: 'squad_scratchpad_write',
+        arguments: {},
+      },
+    );
+
+    await readTool.handler(
+      { handoffId: (publishResult as any).toolTelemetry.handoffId },
+      {
+        sessionId: 'source-session',
+        toolCallId: 'call-read',
+        toolName: 'squad_read_handoff',
+        arguments: {},
+      },
+    );
+
+    expect(recordedEvents).toEqual(expect.arrayContaining([
+      { toolName: 'squad_route', runId: 'run-1' },
+      { toolName: 'squad_publish_handoff', runId: 'run-1' },
+      { toolName: 'squad_scratchpad_write', runId: 'run-1' },
+      { toolName: 'squad_read_handoff', runId: 'run-1' },
+    ]));
   });
 });
 

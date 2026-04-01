@@ -253,10 +253,10 @@ describe('Compat v0.4.1: Config Path Equivalence', () => {
 // ============================================================================
 
 describe('Compat v0.4.1: Tool Registration', () => {
-  it('ToolRegistry registers all 5 built-in tools', () => {
+  it('ToolRegistry preserves the legacy core tool set', () => {
     const registry = new ToolRegistry();
     const tools = registry.getTools();
-    expect(tools.length).toBe(5);
+    expect(tools.length).toBeGreaterThanOrEqual(5);
     const names = tools.map((t) => t.name);
     expect(names).toEqual(
       expect.arrayContaining([
@@ -292,7 +292,7 @@ describe('Compat v0.4.1: Tool Registration', () => {
   it('getToolsForAgent returns all when no filter', () => {
     const registry = new ToolRegistry();
     const all = registry.getToolsForAgent(undefined);
-    expect(all.length).toBe(5);
+    expect(all.length).toBeGreaterThanOrEqual(5);
   });
 });
 

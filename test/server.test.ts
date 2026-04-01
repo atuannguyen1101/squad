@@ -18,6 +18,38 @@ import { ToolRegistry } from '@bradygaster/squad-sdk/tools';
 import { EventBus } from '@bradygaster/squad-sdk/runtime/event-bus';
 import { DEFAULT_CONFIG } from '@bradygaster/squad-sdk/runtime';
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+
+  return { promise, resolve, reject };
+}
+
+function createMockManagedSession(sessionId: string, sendAndWaitImpl: () => Promise<unknown>) {
+  const handlers = new Map<string, Array<(event: any) => void>>();
+
+  return {
+    sessionId,
+    sendAndWait: vi.fn().mockImplementation(sendAndWaitImpl),
+    sendMessage: vi.fn(),
+    close: vi.fn(),
+    on: vi.fn((eventType: string, handler: (event: any) => void) => {
+      const existing = handlers.get(eventType) ?? [];
+      existing.push(handler);
+      handlers.set(eventType, existing);
+    }),
+    emit(eventType: string, event: any) {
+      for (const handler of handlers.get(eventType) ?? []) {
+        handler(event);
+      }
+    },
+  };
+}
+
 // ============================================================================
 // 1. SquadServer Construction
 // ============================================================================
@@ -160,6 +192,183 @@ All integration and unit testing.
     const sessions = manager.listActiveSessions();
     expect(sessions).toEqual([]);
   });
+
+  it('should constrain direct-message follow-up turns with prompt and tool hooks', async () => {
+    const { manager, mockClient } = await createManager(tempDir);
+    const deferred = createDeferred<{ text: string }>();
+    const mockSession = createMockManagedSession('session-123', () => deferred.promise);
+    mockClient.createSession.mockResolvedValue(mockSession);
+
+    await manager.getOrCreateSession('fenster', 'run-1');
+
+    const sessionConfig = mockClient.createSession.mock.calls[0]?.[0];
+    expect(sessionConfig?.hooks).toBeDefined();
+
+    const sendPromise = manager.sendDirectMessage(
+      'fenster',
+      'Please confirm the artifact value.',
+      'run-1',
+      'hockney',
+    );
+
+    const promptHookResult = await sessionConfig.hooks.onUserPromptSubmitted(
+      {
+        timestamp: Date.now(),
+        cwd: tempDir,
+        prompt: 'Please confirm the artifact value.',
+      },
+      { sessionId: 'session-123' },
+    );
+    expect(promptHookResult?.modifiedPrompt).toContain('Direct question turn.');
+    expect(promptHookResult?.modifiedPrompt).toContain('Sender: hockney');
+
+    const deniedTool = await sessionConfig.hooks.onPreToolUse(
+      {
+        timestamp: Date.now(),
+        cwd: tempDir,
+        toolName: 'squad_route',
+        toolArgs: {},
+      },
+      { sessionId: 'session-123' },
+    );
+    expect(deniedTool).toMatchObject({ permissionDecision: 'deny' });
+
+    const allowedTool = await sessionConfig.hooks.onPreToolUse(
+      {
+        timestamp: Date.now(),
+        cwd: tempDir,
+        toolName: 'squad_send',
+        toolArgs: {},
+      },
+      { sessionId: 'session-123' },
+    );
+    expect(allowedTool).toBeUndefined();
+
+    deferred.resolve({ text: 'Confirmed.' });
+    await expect(sendPromise).resolves.toBe('Confirmed.');
+
+    const postReplyTool = await sessionConfig.hooks.onPreToolUse(
+      {
+        timestamp: Date.now(),
+        cwd: tempDir,
+        toolName: 'squad_route',
+        toolArgs: {},
+      },
+      { sessionId: 'session-123' },
+    );
+    expect(postReplyTool).toBeUndefined();
+  });
+
+  it('should keep direct-message restrictions active until the turn finishes', async () => {
+    const { manager, mockClient } = await createManager(tempDir);
+    const deferred = createDeferred<{ text: string }>();
+    const mockSession = createMockManagedSession('session-789', () => deferred.promise);
+    mockClient.createSession.mockResolvedValue(mockSession);
+
+    await manager.getOrCreateSession('fenster', 'run-3');
+    const sessionConfig = mockClient.createSession.mock.calls[0]?.[0];
+
+    const sendPromise = manager.sendDirectMessage(
+      'fenster',
+      'Need the exact artifact value.',
+      'run-3',
+      'hockney',
+    );
+
+    mockSession.emit('message', { content: 'I am checking that now.' });
+
+    const stillDenied = await sessionConfig.hooks.onPreToolUse(
+      {
+        timestamp: Date.now(),
+        cwd: tempDir,
+        toolName: 'squad_read_session',
+        toolArgs: {},
+      },
+      { sessionId: 'session-789' },
+    );
+    expect(stillDenied).toMatchObject({ permissionDecision: 'deny' });
+
+    deferred.resolve({ text: 'The value is confirmed.' });
+    await expect(sendPromise).resolves.toBe('The value is confirmed.');
+
+    const allowedAfterCompletion = await sessionConfig.hooks.onPreToolUse(
+      {
+        timestamp: Date.now(),
+        cwd: tempDir,
+        toolName: 'squad_read_session',
+        toolArgs: {},
+      },
+      { sessionId: 'session-789' },
+    );
+    expect(allowedAfterCompletion).toBeUndefined();
+  });
+
+  it('should track pending direct replies until the reply is delivered', async () => {
+    const { manager, mockClient } = await createManager(tempDir);
+    const fensterSession = createMockManagedSession('session-fenster', async () => undefined);
+    const hockneySession = createMockManagedSession('session-hockney', async () => ({ text: 'Final summary published.' }));
+    mockClient.createSession
+      .mockResolvedValueOnce(fensterSession)
+      .mockResolvedValueOnce(hockneySession);
+
+    await manager.getOrCreateSession('fenster', 'run-4');
+    await manager.getOrCreateSession('hockney', 'run-4');
+
+    await expect(
+      manager.sendDirectMessage('fenster', 'What is the artifact value?', 'run-4', 'hockney'),
+    ).resolves.toBeNull();
+
+    expect(manager.isAwaitingDirectReply('hockney', 'run-4')).toBe(true);
+
+    const hockneySessionConfig = mockClient.createSession.mock.calls[1]?.[0];
+    const replySendPromise = manager.sendDirectMessage(
+      'hockney',
+      'The value is AUTONOMY_PROOF_DELTA_7f3a9c2e.',
+      'run-4',
+      'fenster',
+    );
+
+    const replyPromptHookResult = await hockneySessionConfig.hooks.onUserPromptSubmitted(
+      {
+        timestamp: Date.now(),
+        cwd: tempDir,
+        prompt: 'The value is AUTONOMY_PROOF_DELTA_7f3a9c2e.',
+      },
+      { sessionId: 'session-hockney' },
+    );
+
+    expect(replyPromptHookResult?.modifiedPrompt).toContain('Direct answer turn.');
+    expect(replyPromptHookResult?.modifiedPrompt).toContain('You previously asked this agent for information.');
+
+    await expect(replySendPromise).resolves.toBe('Final summary published.');
+
+    expect(manager.isAwaitingDirectReply('hockney', 'run-4')).toBe(false);
+  });
+
+  it('should leave generic follow-up turns unconstrained', async () => {
+    const { manager, mockClient } = await createManager(tempDir);
+    const deferred = createDeferred<{ text: string }>();
+    const mockSession = createMockManagedSession('session-456', () => deferred.promise);
+    mockClient.createSession.mockResolvedValue(mockSession);
+
+    await manager.getOrCreateSession('fenster', 'run-2');
+    const sessionConfig = mockClient.createSession.mock.calls[0]?.[0];
+
+    const sendPromise = manager.sendFollowUp('fenster', 'General follow-up.', 'run-2');
+    const toolDecision = await sessionConfig.hooks.onPreToolUse(
+      {
+        timestamp: Date.now(),
+        cwd: tempDir,
+        toolName: 'squad_route',
+        toolArgs: {},
+      },
+      { sessionId: 'session-456' },
+    );
+    expect(toolDecision).toBeUndefined();
+
+    deferred.resolve({ text: 'Acknowledged.' });
+    await expect(sendPromise).resolves.toBe('Acknowledged.');
+  });
 });
 
 // ============================================================================
@@ -194,7 +403,7 @@ describe('squad_route mailbox fallback', () => {
     expect(result.textResultForLlm).toContain('fenster');
 
     // Verify mailbox file was created
-    const mailboxDir = path.join(tempDir, 'mailbox', 'fenster');
+    const mailboxDir = path.join(tempDir, '.squad', 'mailbox', 'fenster');
     expect(fs.existsSync(mailboxDir)).toBe(true);
     const files = fs.readdirSync(mailboxDir);
     expect(files.length).toBe(1);

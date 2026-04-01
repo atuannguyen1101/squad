@@ -129,6 +129,7 @@
 
     function fmtUp(s) { if (!s) return ''; if (s<60) return s+'s'; if (s<3600) return ~~(s/60)+'m'; return ~~(s/3600)+'h '+~~((s%3600)/60)+'m'; }
     function ago(ts) { if (!ts) return ''; const s=~~((Date.now()-new Date(ts).getTime())/1000); if (s<60) return s+'s'; if (s<3600) return ~~(s/60)+'m'; return ~~(s/3600)+'h'; }
+    function localTime(ts) { if (!ts) return ''; const d = new Date(ts); return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}); }
     function roleColor(r) { if (!r) return '#8b949e'; r=r.toLowerCase(); if (/lead|orch/.test(r)) return '#d2a8ff'; if (/ui|front|react/.test(r)) return '#7ee787'; if (/core|back|api/.test(r)) return '#ffa657'; if (/test|qa|e2e/.test(r)) return '#79c0ff'; if (/review/.test(r)) return '#f778ba'; return '#8b949e'; }
 
     function agentStatus(a) {
@@ -194,7 +195,7 @@
       el.innerHTML = events.slice(-500).map(e => {
         const t = (e.type||'').toLowerCase();
         const cls = t.includes('created')?'created':t.includes('destroy')||t.includes('close')?'destroyed':t.includes('error')?'error':t.includes('message')?'message':'';
-        const time = e.timestamp ? e.timestamp.slice(11,19) : '';
+        const time = localTime(e.timestamp);
         const ag = e.agentName ? `<span class="agent">[${e.agentName}]</span> ` : '';
         let summary = escHtml(e.summary||e.type||'');
         summary = summary.replace(/\b(Fenster|McManus|Keaton|Kobayashi|Kujan|Redfoot|Strausz)\b/g, '<span class="agent-mention">$1</span>');
@@ -246,14 +247,14 @@
       el.innerHTML = groups.map((g, gi) => {
         if (g.type === 'subagent-group') {
           const count = g.msgs.length;
-          const startTs = g.startTs ? g.startTs.slice(11,19) : '';
-          const endTs = g.msgs[g.msgs.length-1]?.timestamp?.slice(11,19) || '';
+          const startTs = localTime(g.startTs);
+          const endTs = localTime(g.msgs[g.msgs.length-1]?.timestamp) || '';
           const dur = g.msgs.length > 1 && g.startTs && g.msgs[g.msgs.length-1]?.timestamp
             ? Math.round((new Date(g.msgs[g.msgs.length-1].timestamp) - new Date(g.startTs)) / 1000) + 's'
             : '';
           const preview = (g.msgs[g.msgs.length-1]?.content || '').slice(0, 120).replace(/\n/g, ' ');
           const inner = g.msgs.map(m => {
-            const ts = m.timestamp ? m.timestamp.slice(11,19) : '';
+            const ts = localTime(m.timestamp);
             const content = (m.content||'').length > 4000 ? m.content.slice(0,4000)+'...' : m.content||'';
             return `<div class="subagent-item"><span class="ts">${ts}</span>${renderMd(content)}</div>`;
           }).join('');
@@ -269,7 +270,7 @@
           </details>`;
         }
         const m = g.msgs[0];
-        const ts = m.timestamp ? m.timestamp.slice(11,19) : '';
+        const ts = localTime(m.timestamp);
         const cls = m.role === 'user' ? 'user' : 'assistant';
         const content = (m.content||'').length > 8000 ? m.content.slice(0,8000)+'...' : m.content||'';
         return `<div class="msg ${cls}" data-agent="${selectedAgentName || selectedAgent}"><span class="ts">${ts}</span>${renderMd(content)}</div>`;

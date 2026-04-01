@@ -22,10 +22,11 @@ import { analyzeRun, formatAnalysisReport, type SessionSnapshot } from './analyz
 import { triggerAutoSageAnalysis } from './auto-sage.js';
 import { resolveDashboardPort, persistPort, clearPersistedPort } from './dashboard-port.js';
 import { parseCharterMetadata } from '../config/agent-source.js';
-import { RunContextManager } from './run-context.js';
+import { RunContextManager, type RunContext } from './run-context.js';
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { ActiveSessionInfo } from '../server/index.js';
 
 /**
  * Default set of tools exposed on the MCP surface.
@@ -135,39 +136,149 @@ function createIsPlannerRoleDetector(squadRoot: string): (agentName: string) => 
 
 /**
  * Helper to detect if an agent is a doc writer.
- * These roles produce documentation rather than code.
+ * These roles produce documentation rather than code changes.
  */
 function createIsDocWriterRoleDetector(squadRoot: string): (agentName: string) => boolean {
   return (agentName: string) => {
     if (agentRoleCache.has(agentName)) {
       return agentRoleCache.get(agentName)!.isDocWriterRole;
     }
-    
+
     const charterPath = path.join(squadRoot, '.squad', 'agents', agentName, 'charter.md');
     try {
       const content = fs.readFileSync(charterPath, 'utf-8');
       const metadata = parseCharterMetadata(content);
       const role = metadata.role?.toLowerCase() ?? '';
-      
-      // Planner/lead/orchestrator roles: produce planning output
-      const isPlannerRole = role.includes('lead') || 
-                           role.includes('planner') || 
+
+      const isPlannerRole = role.includes('lead') ||
+                           role.includes('planner') ||
                            role.includes('orchestrator') ||
                            role.includes('coordinator') ||
                            role.includes('architect');
-      
-      // Doc writer roles: produce documentation, not code
+
       const isDocWriterRole = role.includes('devrel') ||
                              role.includes('technical writer') ||
                              role.includes('documentation') ||
                              role.includes('docs');
-      
+
       agentRoleCache.set(agentName, { role, isPlannerRole, isDocWriterRole });
       return isDocWriterRole;
     } catch {
       return false; // Charter not found or unreadable - assume code implementer
     }
   };
+}
+
+export function isSessionUnavailableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /session not found|no active session for/i.test(message);
+}
+
+export function formatRunStatusSummary(
+  context: RunContext,
+  activeSessions: ActiveSessionInfo[],
+  dashboardUrl: string | null,
+  communicationTrace?: string,
+): string {
+  const runSessions = activeSessions
+    .filter((session) => session.runId === context.runId)
+    .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+
+  const latestPulses = Array.from(context.pulseCollector.getLatestByAgent().entries())
+    .sort(([left], [right]) => left.localeCompare(right));
+
+  const sessionLines = runSessions.length > 0
+    ? runSessions.map((session) => {
+        const sessionId = session.sessionId.slice(0, 8);
+        return `  - ${session.agentName}: ${session.charterRole} (session: ${sessionId}, messages: ${session.messageCount})`;
+      }).join('\n')
+    : '  (none active)';
+
+  const pulseLines = latestPulses.length > 0
+    ? latestPulses.map(([, pulse]) => `  - ${pulse.agent}: ${pulse.phase} ${pulse.progressPct}% — ${pulse.summary}`).join('\n')
+    : '  (none)';
+
+  const questionLines = context.pendingUserQuestions.length > 0
+    ? context.pendingUserQuestions.map((question, index) => `  ${index + 1}. ${question.question}`).join('\n')
+    : '  none';
+
+  return [
+    `Run: ${context.runId}`,
+    `Status: ${context.status}`,
+    `Intent: ${context.initialMessage}`,
+    dashboardUrl ? `Dashboard: ${dashboardUrl}` : null,
+    `Active sessions in run:\n${sessionLines}`,
+    `Latest pulses:\n${pulseLines}`,
+    `Communication trace:\n${communicationTrace ?? '  (none)'}`,
+    `Pending questions:\n${questionLines}`,
+  ].filter(Boolean).join('\n');
+}
+
+export function getPendingRunFollowUpAgents(
+  agentNames: string[],
+  getMessages: (agentName: string) => Array<{ role: string }>,
+): string[] {
+  return agentNames.filter((agentName) => {
+    const messages = getMessages(agentName);
+    const lastMessage = messages[messages.length - 1];
+    return lastMessage?.role === 'user';
+  });
+}
+
+export function resolveDashboardSendRunId(
+  activeSessions: ActiveSessionInfo[],
+  agentName: string,
+  requestedRunId?: string,
+): { runId?: string } | { error: string; statusCode: number } {
+  const normalizedAgentName = agentName.trim().toLowerCase();
+  const matchingSessions = activeSessions.filter((session) => session.agentName === normalizedAgentName);
+
+  if (matchingSessions.length === 0) {
+    return { error: `No active session for ${normalizedAgentName}`, statusCode: 404 };
+  }
+
+  if (requestedRunId) {
+    const requestedSession = matchingSessions.find((session) => session.runId === requestedRunId);
+    if (!requestedSession) {
+      return {
+        error: `No active session for ${normalizedAgentName} in run ${requestedRunId}`,
+        statusCode: 404,
+      };
+    }
+
+    return { runId: requestedSession.runId };
+  }
+
+  if (matchingSessions.length === 1) {
+    const onlySession = matchingSessions[0];
+    if (!onlySession) {
+      return { error: `No active session for ${normalizedAgentName}`, statusCode: 404 };
+    }
+
+    return { runId: onlySession.runId };
+  }
+
+  return {
+    error: `Multiple active sessions found for ${normalizedAgentName}; provide runId`,
+    statusCode: 409,
+  };
+}
+
+async function waitForPendingRunFollowUps(
+  listAgentNames: () => string[],
+  getMessages: (agentName: string) => Array<{ role: string }>,
+  timeoutMs = 90_000,
+  pollMs = 2_000,
+): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs;
+  let pendingAgents = getPendingRunFollowUpAgents(listAgentNames(), getMessages);
+
+  while (pendingAgents.length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    pendingAgents = getPendingRunFollowUpAgents(listAgentNames(), getMessages);
+  }
+
+  return pendingAgents;
 }
 
 export async function createSquadMCPServer(options: SquadMCPServerOptions): Promise<void> {
@@ -283,6 +394,15 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
     // Internal tools remain defined for documentation but are not registered
   };
 
+  const getRunCommunicationTrace = (runId: string): string => {
+    return server.getEventHistory()
+      .recent(50)
+      .filter((event) => event.type === 'session:tool_call' && (((event.details as Record<string, unknown> | undefined)?.['toolArgs'] as Record<string, unknown> | undefined)?.['runId'] === runId))
+      .slice(-10)
+      .map((event) => `  - ${event.summary}`)
+      .join('\n') || '  (none)';
+  };
+
   // squad_dispatch: Send work to a named agent [INTERNAL - Not exposed on MCP]
   registerTool(
     {
@@ -321,17 +441,41 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       description: 'Get the current status of the Squad orchestration server, including active sessions, pool capacity, and agent details.',
       inputSchema: {
         type: 'object',
-        properties: {},
+        properties: {
+          runId: { type: 'string', description: 'Optional run ID to inspect in detail' },
+        },
       },
     },
-    async () => {
+    async (args) => {
       if (!started) {
         return {
           content: [{ type: 'text', text: 'Server not started yet. No active sessions.' }],
         };
       }
       const status = server.getStatus();
+
+      if (args.runId) {
+        const context = runContextManager.get(args.runId);
+        if (!context) {
+          return {
+            content: [{ type: 'text', text: `Run ${args.runId} not found.` }],
+          };
+        }
+
+        return {
+          content: [{ type: 'text', text: formatRunStatusSummary(context, status.agents, dashboardUrl, getRunCommunicationTrace(args.runId)) }],
+        };
+      }
+
       const agentList = status.agents.map(a => `  - ${a.agentName}: ${a.charterRole} (session: ${a.sessionId.slice(0, 8)})`).join('\n');
+      const runs = runContextManager.getAll()
+        .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
+      const runList = runs.length > 0
+        ? runs.map((context) => {
+            const runAgentCount = status.agents.filter((agent) => agent.runId === context.runId).length;
+            return `  - ${context.runId}: ${context.status} (${runAgentCount} active sessions)`;
+          }).join('\n')
+        : '  (none)';
 
       // Uptime
       const uptimeMs = Date.now() - serverStartTime;
@@ -361,6 +505,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             `Connected: ${status.connectedToHost}`,
             dashboardUrl ? `Dashboard: ${dashboardUrl}` : null,
             `Events recorded: ${history.size}`,
+            `Tracked runs:\n${runList}`,
             status.agents.length > 0 ? `Agents:\n${agentList}` : 'No active agents',
             `Recent activity:\n${recentSummary}`,
           ].filter(Boolean).join('\n'),
@@ -858,7 +1003,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             // If the agent asked questions via pulse, don't accept this reply yet.
             // Wait for the user to respond (squad_respond clears pendingUserQuestions),
             // then capture the agent's NEXT reply after Q&A resolution.
-            if (runContext.pendingUserQuestions.length > 0) {
+            if (runContext.pendingUserQuestions.length > 0 || mgr.isAwaitingDirectReply(agentName, runId)) {
               currentCount = replies.length;
               await new Promise(r => setTimeout(r, 3000));
               continue;
@@ -870,38 +1015,40 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         return null;
       };
 
-      const pipelineDeps: PipelineRunnerDeps = {
-        dispatch: async (agentName: string, task: string, context?: string) => {
+      const buildPipelineDispatch = (): PipelineRunnerDeps['dispatch'] => {
+        return async (agentName: string, task: string, context?: string) => {
           trackAgentMessage(agentName);
           const result = await mgr.dispatch(agentName, task, context, runId);
-          // Grab the latest assistant reply captured by sendAndWait in dispatch
-          const msgs = mgr.getMessages(agentName, runId);
-          const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
-          
-          // AUTO-EMIT DONE PULSE: After agent completes, emit completion signal
-          // so gates have completion data without requiring agents to call squad_pulse manually.
-          const responseContent = lastReply?.content ?? '';
-          const derivedSummary = responseContent || 'Work completed';
-          
+          const response = mgr.isAwaitingDirectReply(result.agentName, runId)
+            ? undefined
+            : result.response;
+
+          // Auto-emit done pulse so implement gates pass when agents
+          // complete work via tool calls without emitting explicit pulses.
+          // Review gates ignore done pulses and require an explicit verdict.
           runContext.pulseCollector.record(createPulse({
             agent: result.agentName,
             phase: 'done',
             status: 'ok',
             progressPct: 100,
-            summary: derivedSummary,
+            summary: response || 'Work completed via tool calls',
             blockers: [],
             questionsForUser: [],
             artifacts: [],
             nextStep: '',
           }));
-          
+
           return {
             sessionId: result.sessionId,
             status: result.status,
             agentName: result.agentName,
-            response: lastReply?.content ?? undefined,
+            response,
           };
-        },
+        };
+      };
+
+      const pipelineDeps: PipelineRunnerDeps = {
+        dispatch: buildPipelineDispatch(),
         waitForResponse,
         onPhaseStart: (phaseId: string, agent: string) => {
           runContext.pulseCollector.record(createPulse({
@@ -909,6 +1056,17 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             summary: `Phase ${phaseId} starting`, blockers: [], questionsForUser: [],
             artifacts: [], nextStep: phaseId,
           }));
+        },
+        onPhaseRetry: (phaseId: string, agent: string, attempt: number, gateDescription: string) => {
+          const eventHistory = server.getEventHistory();
+          if (eventHistory) {
+            eventHistory.push({
+              type: 'phase:gate_retry',
+              agentName: agent,
+              summary: `${agent} gate retry (attempt ${attempt}): ${gateDescription}`,
+              details: { phaseId, attempt, gateDescription, runId },
+            });
+          }
         },
         onPhaseComplete: (result) => {
           // Include agent response in pulse so findings surface through squad_wait
@@ -1069,37 +1227,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
 
         const implPipelineDeps: PipelineRunnerDeps = {
           ...pipelineDeps,
-          dispatch: async (agentName: string, task: string, context?: string) => {
-            trackAgentMessage(agentName);
-            const result = await mgr.dispatch(agentName, task, context, runId);
-            
-            // CRITICAL: Do NOT call waitForDonePulse here (landmine #1 - causes deadlock)
-            // Instead, emit the done pulse immediately after dispatch returns
-            const msgs = mgr.getMessages(agentName, runId);
-            const lastReply = msgs.filter((m: any) => m.role === 'assistant').pop();
-            
-            // AUTO-EMIT DONE PULSE immediately after dispatch
-            const responseContent = lastReply?.content ?? '';
-            const derivedSummary = responseContent || 'Work completed';
-            runContext.pulseCollector.record(createPulse({
-              agent: agentName,
-              phase: 'done',
-              status: 'ok',
-              progressPct: 100,
-              summary: derivedSummary,
-              blockers: [],
-              questionsForUser: [],
-              artifacts: [],
-              nextStep: '',
-            }));
-            
-            return {
-              sessionId: result.sessionId,
-              status: result.status,
-              agentName: result.agentName,
-              response: lastReply?.content ?? undefined,
-            };
-          },
+          dispatch: buildPipelineDispatch(),
         };
 
         const implPipeline = new PipelineRunner(
@@ -1138,7 +1266,18 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         // Auto-close run sessions on pipeline completion
         if (mgr) {
           try {
+            const pendingAgents = await waitForPendingRunFollowUps(
+              () => mgr.listActiveSessions().filter((session) => session.runId === runId).map((session) => session.agentName),
+              (agentName: string) => mgr.getMessages(agentName, runId),
+            );
+
+            if (pendingAgents.length > 0) {
+              process.stderr.write(`[squad-mcp] Closing run ${runId} with pending follow-up replies from: ${pendingAgents.join(', ')}\n`);
+            }
+
             await mgr.closeRunSessions(runId);
+            server.clearRunScratchpad(runId);
+            server.clearRunHandoffStore(runId);
           } catch (err) {
             process.stderr.write(`[squad-mcp] Failed to close run sessions: ${err instanceof Error ? err.message : String(err)}\n`);
           }
@@ -1218,8 +1357,9 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
       const mgr = server.getSessionManager();
       if (!mgr) throw new Error('Server not ready');
 
+      let context: ReturnType<typeof resolveRunContext> | undefined;
       try {
-        const context = resolveRunContext(args.runId);
+        context = resolveRunContext(args.runId);
         const response = await mgr.sendFollowUp('ben', args.message, context.runId);
 
         for (const resolver of context.waitResolvers) {
@@ -1235,6 +1375,19 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           }],
         };
       } catch (err) {
+        if (context && isSessionUnavailableError(err)) {
+          return {
+            content: [{
+              type: 'text',
+              text: [
+                `Ben session unavailable for run ${context.runId}. Your message was not delivered.`,
+                'Current run status:',
+                formatRunStatusSummary(context, server.getStatus().agents, dashboardUrl, getRunCommunicationTrace(context.runId)),
+              ].join('\n\n'),
+            }],
+          };
+        }
+
         return {
           content: [{
             type: 'text',
@@ -1544,6 +1697,8 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           if (mgr) {
             try {
               await mgr.closeRunSessions(context.runId);
+              server.clearRunScratchpad(context.runId);
+              server.clearRunHandoffStore(context.runId);
               summaryLines.push(`Run ${context.runId}: closed agent sessions.`);
             } catch (err) {
               summaryLines.push(`Run ${context.runId}: failed to close sessions: ${err instanceof Error ? err.message : String(err)}`);
@@ -1590,6 +1745,8 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
             const sessionCount = sessionsToClose.length;
             
             await mgr.closeRunSessions(context.runId);
+            server.clearRunScratchpad(context.runId);
+            server.clearRunHandoffStore(context.runId);
             summaryLines.push(`Closed ${sessionCount} agent session(s).`);
           } catch (err) {
             summaryLines.push(`Failed to close sessions: ${err instanceof Error ? err.message : String(err)}`);
@@ -1803,16 +1960,23 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         req.on('data', (c: Buffer) => body += c.toString());
         req.on('end', async () => {
           try {
-            const { agentName, message } = JSON.parse(body);
+            const { agentName, message, runId } = JSON.parse(body);
             if (!agentName || !message) { res.writeHead(400, cors); res.end(JSON.stringify({ error: 'agentName and message required' })); return; }
             const mgr = server.getSessionManager();
             if (!mgr) { res.writeHead(500, cors); res.end(JSON.stringify({ error: 'Server not ready' })); return; }
 
+            const target = resolveDashboardSendRunId(mgr.listActiveSessions(), agentName, runId);
+            if ('error' in target) {
+              res.writeHead(target.statusCode, cors);
+              res.end(JSON.stringify({ error: target.error }));
+              return;
+            }
+
             // Fire-and-forget: queue message for agent, return immediately
-            mgr.sendFollowUp(agentName, message).catch(() => { /* fire-and-forget */ });
+            mgr.sendFollowUp(agentName, message, target.runId).catch(() => { /* fire-and-forget */ });
 
             res.writeHead(200, cors);
-            res.end(JSON.stringify({ sent: true, agentName, queued: true }));
+            res.end(JSON.stringify({ sent: true, agentName, runId: target.runId ?? null, queued: true }));
           } catch (err) {
             res.writeHead(500, cors);
             res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));

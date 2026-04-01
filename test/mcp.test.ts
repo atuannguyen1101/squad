@@ -164,3 +164,141 @@ describe('MCP handleRequest', () => {
     expect(response.result.content[0].text).toContain('intentional failure');
   });
 });
+
+describe('MCP server run status helpers', () => {
+  it('formats run-scoped status with sessions, pulses, and questions', async () => {
+    const { formatRunStatusSummary } = await import('../packages/squad-sdk/src/mcp/server.js');
+    const { createRunContext } = await import('../packages/squad-sdk/src/mcp/run-context.js');
+    const { createPulse } = await import('../packages/squad-sdk/src/pulse/pulse.js');
+
+    const context = createRunContext('run-123', 'Validate MCP inspection');
+    context.pendingUserQuestions.push({
+      questionId: 'q1',
+      agentName: 'ben',
+      question: 'Need clarification?',
+      timestamp: new Date().toISOString(),
+    });
+    context.pulseCollector.record(createPulse({
+      agent: 'fido',
+      phase: 'reviewing',
+      status: 'ok',
+      progressPct: 80,
+      summary: 'Checking handoff artifacts',
+      blockers: [],
+      questionsForUser: [],
+      artifacts: [],
+      nextStep: '',
+    }));
+
+    const summary = formatRunStatusSummary(
+      context,
+      [
+        {
+          agentName: 'fido',
+          sessionId: '12345678-1234-1234-1234-123456789abc',
+          runId: 'run-123',
+          createdAt: new Date('2026-03-31T00:00:00.000Z'),
+          lastActiveAt: new Date('2026-03-31T00:01:00.000Z'),
+          charterRole: 'Quality Owner',
+          messageCount: 4,
+        },
+      ],
+      'http://localhost:3850',
+      '  - fido read handoff handoff-1\n  - eecom wrote scratchpad eecom:artifact',
+    );
+
+    expect(summary).toContain('Run: run-123');
+    expect(summary).toContain('Status: active');
+    expect(summary).toContain('Validate MCP inspection');
+    expect(summary).toContain('fido: Quality Owner');
+    expect(summary).toContain('fido: reviewing 80%');
+    expect(summary).toContain('Communication trace:');
+    expect(summary).toContain('fido read handoff handoff-1');
+    expect(summary).toContain('Need clarification?');
+    expect(summary).toContain('http://localhost:3850');
+  });
+
+  it('detects stale session errors for ask fallback', async () => {
+    const { isSessionUnavailableError } = await import('../packages/squad-sdk/src/mcp/server.js');
+
+    expect(isSessionUnavailableError(new Error('No active session for ben (runId: run-1)'))).toBe(true);
+    expect(isSessionUnavailableError(new Error('Request session.send failed with message: Session not found: abc'))).toBe(true);
+    expect(isSessionUnavailableError(new Error('Completely different error'))).toBe(false);
+  });
+
+  it('detects agents with pending follow-up replies before run close', async () => {
+    const { getPendingRunFollowUpAgents } = await import('../packages/squad-sdk/src/mcp/server.js');
+
+    const pending = getPendingRunFollowUpAgents(
+      ['fenster', 'hockney', 'ben'],
+      (agentName: string) => {
+        if (agentName === 'fenster') {
+          return [
+            { role: 'assistant' },
+            { role: 'user' },
+          ];
+        }
+        if (agentName === 'hockney') {
+          return [
+            { role: 'assistant' },
+            { role: 'assistant' },
+          ];
+        }
+        return [];
+      },
+    );
+
+    expect(pending).toEqual(['fenster']);
+  });
+
+  it('resolves a unique active run for dashboard follow-up delivery', async () => {
+    const { resolveDashboardSendRunId } = await import('../packages/squad-sdk/src/mcp/server.js');
+
+    const resolved = resolveDashboardSendRunId(
+      [
+        {
+          agentName: 'hockney',
+          sessionId: 'session-1',
+          runId: 'run-123',
+          createdAt: new Date('2026-03-31T00:00:00.000Z'),
+          lastActiveAt: new Date('2026-03-31T00:01:00.000Z'),
+          charterRole: 'Reviewer',
+          messageCount: 5,
+        },
+      ],
+      'hockney',
+    );
+
+    expect(resolved).toEqual({ runId: 'run-123' });
+  });
+
+  it('rejects ambiguous dashboard follow-up delivery without runId', async () => {
+    const { resolveDashboardSendRunId } = await import('../packages/squad-sdk/src/mcp/server.js');
+
+    const resolved = resolveDashboardSendRunId(
+      [
+        {
+          agentName: 'hockney',
+          sessionId: 'session-1',
+          runId: 'run-123',
+          createdAt: new Date('2026-03-31T00:00:00.000Z'),
+          lastActiveAt: new Date('2026-03-31T00:01:00.000Z'),
+          charterRole: 'Reviewer',
+          messageCount: 5,
+        },
+        {
+          agentName: 'hockney',
+          sessionId: 'session-2',
+          runId: 'run-456',
+          createdAt: new Date('2026-03-31T00:02:00.000Z'),
+          lastActiveAt: new Date('2026-03-31T00:03:00.000Z'),
+          charterRole: 'Reviewer',
+          messageCount: 2,
+        },
+      ],
+      'hockney',
+    );
+
+    expect(resolved).toEqual({ error: 'Multiple active sessions found for hockney; provide runId', statusCode: 409 });
+  });
+});

@@ -446,6 +446,17 @@ export class SquadClient {
     this.connectPromise = null;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private registerSessionHooks(session: any, config: SquadSessionConfig): void {
+    if (!config.hooks) {
+      return;
+    }
+
+    if (typeof session.registerHooks === 'function') {
+      session.registerHooks(config.hooks);
+    }
+  }
+
   /**
    * Create a new Squad session.
    * 
@@ -470,6 +481,7 @@ export class SquadClient {
       try {
         // Cast config to handle SDK version differences in SessionConfig type
         const session = await this.client.createSession(config as Parameters<typeof this.client.createSession>[0]);
+        this.registerSessionHooks(session, config);
         const result = new CopilotSessionAdapter(session);
         if (result.sessionId) {
           span.setAttribute('session.id', result.sessionId);
@@ -547,6 +559,7 @@ export class SquadClient {
       try {
         // Cast config to handle SDK version differences in ResumeSessionConfig type
         const session = await this.client.resumeSession(sessionId, config as Parameters<typeof this.client.resumeSession>[1]);
+        this.registerSessionHooks(session, config);
         return new CopilotSessionAdapter(session);
       } catch (error) {
         if (this.shouldAttemptReconnect(error)) {

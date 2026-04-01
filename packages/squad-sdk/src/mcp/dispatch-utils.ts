@@ -23,7 +23,7 @@ export class DispatchSemaphore {
   private active = 0;
   private readonly maxConcurrent: number;
 
-  constructor(maxConcurrent: number = 1) {
+  constructor(maxConcurrent: number = 7) {
     this.maxConcurrent = maxConcurrent;
   }
 

@@ -26,6 +26,7 @@ import { ServerPersistence, type PersistenceConfig, type ServerStateSnapshot } f
 import { EventHistory, type HistoryEvent } from './event-history.js';
 import { PulseCollector, createPulse as createPulseFn, filterPulseForUser as filterPulseFn } from '../pulse/index.js';
 import { Scratchpad } from '../scratchpad/index.js';
+import { HandoffStore } from '../handoff/index.js';
 import { enableLearningPersistence } from '../agents/learning-persistence.js';
 import type { UnsubscribeFn } from '../runtime/event-bus.js';
 
@@ -77,6 +78,9 @@ export class SquadServer {
   private readonly persistence: ServerPersistence;
   private readonly pulseCollector: PulseCollector;
   private readonly scratchpad: Scratchpad;
+  private readonly runScratchpads: Map<string, Scratchpad>;
+  private readonly handoffStore: HandoffStore;
+  private readonly runHandoffStores: Map<string, HandoffStore>;
   private readonly serverStartedAt: string;
 
   private client: SquadClientWithPool | null = null;
@@ -119,6 +123,9 @@ export class SquadServer {
     // components that aren't created until start().
     this.pulseCollector = new PulseCollector();
     this.scratchpad = new Scratchpad();
+    this.runScratchpads = new Map();
+    this.handoffStore = new HandoffStore();
+    this.runHandoffStores = new Map();
 
     this.toolRegistry = new ToolRegistry(
       // squadRoot for file-based tools (decisions, history, skills)
@@ -129,8 +136,8 @@ export class SquadServer {
       () => {
         if (!this.sessionManager) return undefined;
         const mgr = this.sessionManager;
-        return async (agentName: string, task: string, context?: string) => {
-          const result = await mgr.dispatch(agentName, task, context);
+        return async (agentName: string, task: string, context?: string, runId?: string) => {
+          const result = await mgr.dispatch(agentName, task, context, runId);
           return { sessionId: result.sessionId, status: result.status };
         };
       },
@@ -138,16 +145,16 @@ export class SquadServer {
       () => {
         if (!this.sessionManager) return undefined;
         const mgr = this.sessionManager;
-        return async (agentName: string, message: string) => {
-          return mgr.sendFollowUp(agentName, message);
+        return async (agentName: string, message: string, runId?: string, sourceAgent?: string) => {
+          return mgr.sendDirectMessage(agentName, message, runId, sourceAgent);
         };
       },
       // getMessagesGetter — returns the getMessages function for squad_read_session
       () => {
         if (!this.sessionManager) return undefined;
         const mgr = this.sessionManager;
-        return (agentName: string) => {
-          return mgr.getMessages(agentName);
+        return (agentName: string, runId?: string) => {
+          return mgr.getMessages(agentName, runId);
         };
       },
       // pulseRecordGetter — records a pulse in the shared collector
@@ -170,6 +177,50 @@ export class SquadServer {
       },
       // scratchpadGetter — returns the shared scratchpad
       () => this.scratchpad,
+      // sessionContextGetter — resolves the calling session back to its run context
+      () => {
+        if (!this.sessionManager) return undefined;
+        const mgr = this.sessionManager;
+        return (sessionId: string) => mgr.getSessionContextBySessionId(sessionId);
+      },
+      // runScratchpadGetter — returns the scratchpad scoped to the caller run
+      () => (runId?: string) => this.getScratchpadForRun(runId),
+      // runHandoffStoreGetter — returns the handoff store scoped to the caller run
+      () => (runId?: string) => this.getHandoffStoreForRun(runId),
+      // listSessionsForRunGetter — returns active sessions scoped to a target run
+      () => {
+        if (!this.sessionManager) return undefined;
+        const mgr = this.sessionManager;
+        return (runId: string) => mgr.listSessionsForRun(runId).map((entry) => ({
+          agentName: entry.agentName,
+          sessionId: entry.session.sessionId,
+        }));
+      },
+      // toolEventRecorderGetter — record communication edges from internal tool handlers
+      () => {
+        const eventBus = this.eventBus;
+        return async (event) => {
+          await eventBus.emit({
+            type: 'session:tool_call',
+            sessionId: event.sessionId,
+            agentName: event.agentName,
+            payload: {
+              toolName: event.toolName,
+              toolArgs: {
+                runId: event.runId,
+                ...(event.details ?? {}),
+              },
+              resultType: 'success',
+            },
+            timestamp: new Date(),
+          });
+        };
+      },
+      // runEventsGetter — return recent communication events for a specific run
+      () => (runId: string) => this.eventHistory
+        .recent(200)
+        .filter((event) => event.type === 'session:tool_call' && (((event.details as Record<string, unknown> | undefined)?.['toolArgs'] as Record<string, unknown> | undefined)?.['runId'] === runId))
+        .map((event) => ({ summary: event.summary, type: event.type, agentName: event.agentName })),
     );
   }
 
@@ -356,6 +407,15 @@ export class SquadServer {
     }
     this.eventBus.clear();
     this.scratchpad.clear();
+    for (const pad of this.runScratchpads.values()) {
+      pad.clear();
+    }
+    this.runScratchpads.clear();
+    this.handoffStore.clear();
+    for (const store of this.runHandoffStores.values()) {
+      store.clear();
+    }
+    this.runHandoffStores.clear();
 
     this.coordinator = null;
     this.running = false;
@@ -444,6 +504,39 @@ export class SquadServer {
         return `${event.agentName || 'agent'}: ${p?.milestone ?? 'milestone'}`;
       case 'session:error':
         return `Error: ${p?.error ?? p?.message ?? 'unknown'}`;
+      case 'session:tool_call': {
+        const toolName = String(p?.toolName ?? 'unknown');
+        const toolArgs = (p?.toolArgs as Record<string, unknown> | undefined) ?? {};
+        const actor = event.agentName || 'agent';
+        if (toolName === 'squad_route') {
+          return `${actor} routed work to ${String(toolArgs['targetAgent'] ?? 'unknown')}`;
+        }
+        if (toolName === 'squad_send') {
+          return `${actor} sent a message to ${String(toolArgs['targetAgent'] ?? 'unknown')}`;
+        }
+        if (toolName === 'squad_read_session') {
+          return `${actor} read session for ${String(toolArgs['targetAgent'] ?? 'unknown')}`;
+        }
+        if (toolName === 'squad_publish_handoff') {
+          return `${actor} published handoff ${String(toolArgs['handoffId'] ?? 'unknown')} to ${String(toolArgs['toAgent'] ?? 'broadcast')}`;
+        }
+        if (toolName === 'squad_read_handoff') {
+          return `${actor} read handoff ${String(toolArgs['handoffId'] ?? 'unknown')}`;
+        }
+        if (toolName === 'squad_list_handoffs') {
+          return `${actor} listed handoffs`;
+        }
+        if (toolName === 'squad_scratchpad_write') {
+          return `${actor} wrote scratchpad ${String(toolArgs['key'] ?? 'unknown')}`;
+        }
+        if (toolName === 'squad_scratchpad_read') {
+          return `${actor} read scratchpad ${String(toolArgs['key'] ?? 'unknown')}`;
+        }
+        if (toolName === 'squad_scratchpad_list') {
+          return `${actor} listed scratchpad entries`;
+        }
+        return `${actor} used ${toolName}`;
+      }
       default:
         return `${event.type}: ${event.agentName || 'system'}`;
     }
@@ -476,6 +569,54 @@ export class SquadServer {
 
   getScratchpad(): Scratchpad {
     return this.scratchpad;
+  }
+
+  getScratchpadForRun(runId?: string): Scratchpad {
+    if (!runId) {
+      return this.scratchpad;
+    }
+
+    let pad = this.runScratchpads.get(runId);
+    if (!pad) {
+      pad = new Scratchpad();
+      this.runScratchpads.set(runId, pad);
+    }
+
+    return pad;
+  }
+
+  clearRunScratchpad(runId: string): void {
+    const pad = this.runScratchpads.get(runId);
+    if (!pad) {
+      return;
+    }
+
+    pad.clear();
+    this.runScratchpads.delete(runId);
+  }
+
+  getHandoffStoreForRun(runId?: string): HandoffStore {
+    if (!runId) {
+      return this.handoffStore;
+    }
+
+    let store = this.runHandoffStores.get(runId);
+    if (!store) {
+      store = new HandoffStore();
+      this.runHandoffStores.set(runId, store);
+    }
+
+    return store;
+  }
+
+  clearRunHandoffStore(runId: string): void {
+    const store = this.runHandoffStores.get(runId);
+    if (!store) {
+      return;
+    }
+
+    store.clear();
+    this.runHandoffStores.delete(runId);
   }
 
   /**

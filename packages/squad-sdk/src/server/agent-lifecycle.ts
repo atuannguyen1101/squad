@@ -83,6 +83,10 @@ export interface AgentSessionEntry {
   contextWindowState: ContextWindowState;
   /** File paths this agent is working on (for instruction injection) */
   workingFilePaths?: string[];
+  /** Optional policy applied to the next follow-up turn */
+  pendingTurnPolicy?: PendingTurnPolicy;
+  /** Agents this session is still waiting to hear back from */
+  awaitingDirectRepliesFrom: Set<string>;
 }
 
 export interface DispatchResult {
@@ -92,6 +96,8 @@ export interface DispatchResult {
   status: 'sent' | 'created_and_sent';
   /** Agent name */
   agentName: string;
+  /** Captured response from sendAndWait (undefined if fire-and-forget) */
+  response?: string;
 }
 
 export interface ActiveSessionInfo {
@@ -106,6 +112,63 @@ export interface ActiveSessionInfo {
 
 // Maximum bytes of history to include in the compiled charter prompt
 const MAX_HISTORY_BYTES = 2048;
+
+type PendingTurnPolicy = {
+  kind: 'direct-request' | 'direct-reply';
+  sourceAgent?: string;
+};
+
+const DIRECT_MESSAGE_ALLOWED_TOOLS = new Set([
+  'squad_send',
+  'squad_publish_handoff',
+  'squad_read_handoff',
+  'squad_list_handoffs',
+  'squad_scratchpad_read',
+  'squad_scratchpad_list',
+  'squad_scratchpad_write',
+  'squad_pulse',
+]);
+
+function formatDirectRequestPrompt(prompt: string, sourceAgent?: string): string {
+  const senderLine = sourceAgent
+    ? `Sender: ${sourceAgent}`
+    : 'Sender: another active agent in this run';
+
+  return [
+    'Direct question turn.',
+    senderLine,
+    '- Treat this as a direct question from another active agent, not a new routing task.',
+    '- If you already know the answer, reply with the exact answer in this turn.',
+    '- Do not leave the sender waiting unless you truly need another agent-to-agent follow-up.',
+    '- Use squad_publish_handoff only when the message explicitly asks for a structured handoff or another agent needs a durable summary.',
+    '- Use squad_send only when you need to ask a clarifying question or send a result to another active agent.',
+    '- Do not route this work to another agent.',
+    '- Do not inspect other session transcripts during this turn.',
+    '',
+    'Incoming message:',
+    prompt,
+  ].join('\n');
+}
+
+function formatDirectReplyPrompt(prompt: string, sourceAgent?: string): string {
+  const senderLine = sourceAgent
+    ? `Sender: ${sourceAgent}`
+    : 'Sender: another active agent in this run';
+
+  return [
+    'Direct answer turn.',
+    senderLine,
+    '- You previously asked this agent for information. This message is their answer.',
+    '- Continue your existing task using this answer; do not treat it as a new routing task.',
+    '- Do not ask the same question again unless the answer is still missing or contradictory.',
+    '- If this answer resolves the open issue, finish the task now and publish any required final handoff or verdict.',
+    '- Do not route this work to another agent.',
+    '- Do not inspect other session transcripts during this turn unless the answer is clearly incomplete.',
+    '',
+    'Incoming answer:',
+    prompt,
+  ].join('\n');
+}
 
 /**
  * Placeholder message recorded when an agent completes its turn via tool calls
@@ -373,6 +436,7 @@ export class AgentSessionManager {
       },
       workingDirectory: this.workingDirectory ?? this.squadRoot,
       onPermissionRequest: () => ({ kind: 'approved' as const }),
+      hooks: this.buildSessionHooks(sessionKey),
     };
 
     const session = await this.client.createSession(sessionConfig);
@@ -387,6 +451,7 @@ export class AgentSessionManager {
       lastActiveAt: now,
       messages: [],
       contextWindowState: createContextWindowState(),
+      awaitingDirectRepliesFrom: new Set(),
     };
     this.sessions.set(sessionKey, entry);
 
@@ -443,6 +508,7 @@ export class AgentSessionManager {
 
     const entry = this.sessions.get(sessionKey);
     if (entry) {
+      entry.pendingTurnPolicy = undefined;
       entry.lastActiveAt = new Date();
       entry.messages.push({
         role: 'user',
@@ -450,6 +516,8 @@ export class AgentSessionManager {
         timestamp: new Date().toISOString(),
       });
     }
+
+    let capturedResponse: string | undefined;
 
     // Use safeSendAndWait with semaphore protection to capture the assistant's response
     if (session.sendAndWait) {
@@ -459,18 +527,12 @@ export class AgentSessionManager {
         try {
           const result = await safeSendAndWait(session, prompt, 90_000);
           const content = extractResponseContent(result);
-          if (entry) {
-            if (content) {
-              entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
-            } else if (result != null) {
-              // Agent completed its turn but returned empty text — likely did work via
-              // tool calls (file edits, commands). Record a placeholder so waitForResponse
-              // can detect that the turn finished instead of timing out.
-              entry.messages.push({
-                role: 'assistant',
-                content: TOOL_CALL_PLACEHOLDER,
-                timestamp: new Date().toISOString(),
-              });
+          capturedResponse = content ?? (result != null ? TOOL_CALL_PLACEHOLDER : undefined);
+          if (entry && capturedResponse) {
+            // Only push if the on('message') listener hasn't already captured this response
+            const lastMsg = entry.messages[entry.messages.length - 1];
+            if (!(lastMsg?.role === 'assistant' && lastMsg.content === capturedResponse)) {
+              entry.messages.push({ role: 'assistant', content: capturedResponse, timestamp: new Date().toISOString() });
             }
           }
         } finally {
@@ -491,27 +553,21 @@ export class AgentSessionManager {
               try {
                 const retryResult = await safeSendAndWait(newSession, prompt, 90_000);
                 const retryContent = extractResponseContent(retryResult);
+                capturedResponse = retryContent ?? (retryResult != null ? TOOL_CALL_PLACEHOLDER : undefined);
                 const newEntry = this.sessions.get(newKey);
-                if (newEntry) {
-                  if (retryContent) {
-                    newEntry.messages.push({ role: 'assistant', content: retryContent, timestamp: new Date().toISOString() });
-                  } else if (retryResult != null) {
-                    newEntry.messages.push({
-                      role: 'assistant',
-                      content: TOOL_CALL_PLACEHOLDER,
-                      timestamp: new Date().toISOString(),
-                    });
+                if (newEntry && capturedResponse) {
+                  const lastMsg = newEntry.messages[newEntry.messages.length - 1];
+                  if (!(lastMsg?.role === 'assistant' && lastMsg.content === capturedResponse)) {
+                    newEntry.messages.push({ role: 'assistant', content: capturedResponse, timestamp: new Date().toISOString() });
                   }
                 }
               } finally {
                 release();
               }
             } else {
-              // New session doesn't support sendAndWait — fall back to sendMessage
               await newSession.sendMessage({ prompt });
             }
           } catch {
-            // Retry failed — fall back to fire-and-forget with the new session
             const currentEntry = this.sessions.get(sessionKey);
             if (currentEntry?.session) {
               await currentEntry.session.sendMessage({ prompt });
@@ -548,6 +604,7 @@ export class AgentSessionManager {
       sessionId: session.sessionId,
       status: created ? 'created_and_sent' : 'sent',
       agentName: resolvedName,
+      response: capturedResponse,
     };
   }
 
@@ -917,6 +974,23 @@ You can communicate with other squad members using these tools:
   }
 
   /**
+   * Resolve a live sessionId back to its agent/run context.
+   * Used by in-session tools to stay inside the caller's run.
+   */
+  getSessionContextBySessionId(sessionId: string): { agentName: string; runId?: string } | null {
+    for (const entry of this.sessions.values()) {
+      if (entry.session.sessionId === sessionId) {
+        return {
+          agentName: entry.agentName,
+          runId: entry.runId,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Get messages for a session by its UUID sessionId.
    * Useful when you have the sessionId but not the agent name (e.g., from dashboard).
    */
@@ -947,13 +1021,55 @@ You can communicate with other squad members using these tools:
    * @param runId - Optional run ID for multi-run isolation
    */
   async sendFollowUp(agentName: string, message: string, runId?: string): Promise<string | null> {
+    return this.sendFollowUpWithPolicy(agentName, message, runId);
+  }
+
+  async sendDirectMessage(agentName: string, message: string, runId?: string, sourceAgent?: string): Promise<string | null> {
+    return this.sendFollowUpWithPolicy(agentName, message, runId, {
+      kind: 'direct-request',
+      sourceAgent,
+    });
+  }
+
+  private async sendFollowUpWithPolicy(
+    agentName: string,
+    message: string,
+    runId?: string,
+    policy?: PendingTurnPolicy,
+  ): Promise<string | null> {
     const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
     const sessionKey = makeSessionKey(resolved, runId);
     const entry = this.sessions.get(sessionKey);
     if (!entry) throw new Error(`No active session for ${resolved}${runId ? ` (runId: ${runId})` : ''}`);
 
+    const directMessageSource = policy?.sourceAgent;
+    const sourceAgentKey = directMessageSource
+      ? resolveAgentName(this.squadRoot, directMessageSource).toLowerCase()
+      : undefined;
+    const awaitingReplyFromSource = sourceAgentKey
+      ? entry.awaitingDirectRepliesFrom.has(sourceAgentKey)
+      : false;
+    const effectivePolicy = policy?.kind === 'direct-request' && awaitingReplyFromSource
+      ? { kind: 'direct-reply' as const, sourceAgent: directMessageSource }
+      : policy;
+    const syncPendingDirectReply = (responseCaptured: boolean): void => {
+      if (!directMessageSource) {
+        return;
+      }
+
+      if (responseCaptured) {
+        this.clearAwaitingDirectReply(directMessageSource, runId, resolved);
+      } else {
+        this.markAwaitingDirectReply(directMessageSource, runId, resolved);
+      }
+    };
+
     entry.messages.push({ role: 'user', content: message, timestamp: new Date().toISOString() });
     entry.lastActiveAt = new Date();
+    this.setPendingTurnPolicy(sessionKey, effectivePolicy);
+    if (directMessageSource) {
+      this.resolveAwaitingDirectReply(sessionKey, directMessageSource);
+    }
 
     // Use safeSendAndWait with semaphore protection if available
     if (entry.session.sendAndWait) {
@@ -962,15 +1078,16 @@ You can communicate with other squad members using these tools:
         try {
           const result = await safeSendAndWait(entry.session, message, 90_000);
           const content = extractResponseContent(result);
-          if (content) {
-            entry.messages.push({ role: 'assistant', content, timestamp: new Date().toISOString() });
-          } else if (result != null) {
-            // Agent completed its turn with empty text — likely did work via tool calls.
-            const placeholder = TOOL_CALL_PLACEHOLDER;
-            entry.messages.push({ role: 'assistant', content: placeholder, timestamp: new Date().toISOString() });
-            return placeholder;
+          const responseText = content ?? (result != null ? TOOL_CALL_PLACEHOLDER : null);
+          this.clearPendingTurnPolicy(sessionKey);
+          syncPendingDirectReply(responseText != null);
+          if (responseText) {
+            const lastMsg = entry.messages[entry.messages.length - 1];
+            if (!(lastMsg?.role === 'assistant' && lastMsg.content === responseText)) {
+              entry.messages.push({ role: 'assistant', content: responseText, timestamp: new Date().toISOString() });
+            }
           }
-          return content;
+          return responseText;
         } finally {
           release();
         }
@@ -984,32 +1101,39 @@ You can communicate with other squad members using these tools:
           this.sessions.delete(sessionKey);
           try {
             const { session: newSession, sessionKey: newKey } = await this.getOrCreateSession(agentName, runId);
+            this.setPendingTurnPolicy(newKey, policy);
+            if (directMessageSource) {
+              this.resolveAwaitingDirectReply(newKey, directMessageSource);
+            }
             if (newSession.sendAndWait) {
               const release = await this.dispatchSemaphore.acquire();
               try {
                 const retryResult = await safeSendAndWait(newSession, message, 90_000);
                 const retryContent = extractResponseContent(retryResult);
+                const retryResponseText = retryContent ?? (retryResult != null ? TOOL_CALL_PLACEHOLDER : null);
                 const newEntry = this.sessions.get(newKey);
+                this.clearPendingTurnPolicy(newKey);
+                syncPendingDirectReply(retryResponseText != null);
                 if (newEntry) {
-                  if (retryContent) {
-                    newEntry.messages.push({ role: 'assistant', content: retryContent, timestamp: new Date().toISOString() });
-                  } else if (retryResult != null) {
-                    const placeholder = TOOL_CALL_PLACEHOLDER;
-                    newEntry.messages.push({ role: 'assistant', content: placeholder, timestamp: new Date().toISOString() });
-                    return placeholder;
+                  if (retryResponseText) {
+                    newEntry.messages.push({ role: 'assistant', content: retryResponseText, timestamp: new Date().toISOString() });
                   }
                 }
-                return retryContent;
+                return retryResponseText;
               } finally {
                 release();
               }
             } else {
               // New session doesn't support sendAndWait — fall back to sendMessage
+              this.clearPendingTurnPolicy(newKey);
+              syncPendingDirectReply(false);
               await newSession.sendMessage({ prompt: message });
               return null;
             }
           } catch {
             // Retry failed — fall back to fire-and-forget with the new session
+            this.clearPendingTurnPolicy(sessionKey);
+            syncPendingDirectReply(false);
             const currentEntry = this.sessions.get(sessionKey);
             if (currentEntry?.session) {
               await currentEntry.session.sendMessage({ prompt: message });
@@ -1018,12 +1142,16 @@ You can communicate with other squad members using these tools:
           }
         } else {
           // Timeout or other error — fall back to fire-and-forget
+          this.clearPendingTurnPolicy(sessionKey);
+          syncPendingDirectReply(false);
           await entry.session.sendMessage({ prompt: message });
           return null;
         }
       }
     }
 
+    this.clearPendingTurnPolicy(sessionKey);
+    syncPendingDirectReply(false);
     await entry.session.sendMessage({ prompt: message });
     return null;
   }
@@ -1033,6 +1161,104 @@ You can communicate with other squad members using these tools:
    */
   hasSession(agentName: string): boolean {
     return this.sessions.has(agentName);
+  }
+
+  isAwaitingDirectReply(agentName: string, runId?: string): boolean {
+    const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
+    const sessionKey = makeSessionKey(resolved, runId);
+    return (this.sessions.get(sessionKey)?.awaitingDirectRepliesFrom.size ?? 0) > 0;
+  }
+
+  private buildSessionHooks(sessionKey: string): NonNullable<SquadSessionConfig['hooks']> {
+    return {
+      onUserPromptSubmitted: (input) => {
+        const policy = this.sessions.get(sessionKey)?.pendingTurnPolicy;
+        if (!policy) {
+          return;
+        }
+
+        if (policy.kind === 'direct-request') {
+          return {
+            modifiedPrompt: formatDirectRequestPrompt(input.prompt, policy.sourceAgent),
+          };
+        }
+
+        if (policy.kind === 'direct-reply') {
+          return {
+            modifiedPrompt: formatDirectReplyPrompt(input.prompt, policy.sourceAgent),
+          };
+        }
+      },
+      onPreToolUse: (input) => {
+        const policy = this.sessions.get(sessionKey)?.pendingTurnPolicy;
+        if (!policy) {
+          return;
+        }
+
+        if (!DIRECT_MESSAGE_ALLOWED_TOOLS.has(input.toolName)) {
+          const reason = policy.kind === 'direct-reply'
+            ? input.toolName === 'squad_route' || input.toolName === 'squad_read_session'
+              ? 'This turn delivers the answer to your pending direct question. Continue the task directly instead of rerouting work or reading transcripts.'
+              : 'This turn delivers the answer to your pending direct question. Only completion, handoff, scratchpad, and pulse tools are allowed.'
+            : input.toolName === 'squad_route' || input.toolName === 'squad_read_session'
+              ? 'This turn is a direct agent-to-agent question. Reply directly instead of rerouting work or reading transcripts.'
+              : 'This turn is a direct agent-to-agent question. Only direct reply, handoff, scratchpad, and pulse tools are allowed.';
+          return {
+            permissionDecision: 'deny' as const,
+            permissionDecisionReason: reason,
+          };
+        }
+      },
+    };
+  }
+
+  private setPendingTurnPolicy(sessionKey: string, policy?: PendingTurnPolicy): void {
+    const entry = this.sessions.get(sessionKey);
+    if (entry) {
+      entry.pendingTurnPolicy = policy;
+    }
+  }
+
+  private clearPendingTurnPolicy(sessionKey: string): void {
+    const entry = this.sessions.get(sessionKey);
+    if (entry?.pendingTurnPolicy) {
+      entry.pendingTurnPolicy = undefined;
+    }
+  }
+
+  private markAwaitingDirectReply(agentName: string, runId: string | undefined, expectedFromAgent: string): void {
+    const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
+    const sessionKey = makeSessionKey(resolved, runId);
+    const entry = this.sessions.get(sessionKey);
+    if (!entry) {
+      return;
+    }
+
+    entry.awaitingDirectRepliesFrom.add(resolveAgentName(this.squadRoot, expectedFromAgent).toLowerCase());
+  }
+
+  private clearAwaitingDirectReply(agentName: string, runId: string | undefined, expectedFromAgent: string): void {
+    const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
+    const sessionKey = makeSessionKey(resolved, runId);
+    const entry = this.sessions.get(sessionKey);
+    if (!entry) {
+      return;
+    }
+
+    entry.awaitingDirectRepliesFrom.delete(resolveAgentName(this.squadRoot, expectedFromAgent).toLowerCase());
+  }
+
+  private resolveAwaitingDirectReply(sessionKey: string, sourceAgent?: string): void {
+    if (!sourceAgent) {
+      return;
+    }
+
+    const entry = this.sessions.get(sessionKey);
+    if (!entry) {
+      return;
+    }
+
+    entry.awaitingDirectRepliesFrom.delete(resolveAgentName(this.squadRoot, sourceAgent).toLowerCase());
   }
 
   /**

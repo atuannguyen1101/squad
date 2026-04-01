@@ -90,6 +90,24 @@ describe('CopilotSessionAdapter (via SquadClient)', () => {
     expect(mockSession.send).toHaveBeenCalledWith(opts);
   });
 
+  it('createSession() registers hooks on the underlying Copilot session', async () => {
+    const client = new SquadClient({ autoStart: false });
+    (client as any).state = 'connected';
+
+    const mockSession = createMockCopilotSession();
+    (client as any).client.createSession = vi.fn().mockResolvedValue(mockSession);
+
+    const hooks = {
+      onUserPromptSubmitted: vi.fn(),
+      onPreToolUse: vi.fn(),
+    };
+
+    await client.createSession({ hooks });
+
+    expect(mockSession.registerHooks).toHaveBeenCalledOnce();
+    expect(mockSession.registerHooks).toHaveBeenCalledWith(hooks);
+  });
+
   // --- Event name mapping ---
 
   it('on() maps Squad short names to SDK dotted names', async () => {
@@ -293,6 +311,23 @@ describe('CopilotSessionAdapter via resumeSession', () => {
     expect(session.sessionId).toBe('resumed-session-99');
     await session.sendMessage({ prompt: 'resumed' });
     expect(mockSession.send).toHaveBeenCalledWith({ prompt: 'resumed' });
+  });
+
+  it('resumeSession() registers hooks on the underlying Copilot session', async () => {
+    const client = new SquadClient({ autoStart: false });
+    (client as any).state = 'connected';
+
+    const mockSession = createMockCopilotSession('resumed-session-hooks');
+    (client as any).client.resumeSession = vi.fn().mockResolvedValue(mockSession);
+
+    const hooks = {
+      onUserPromptSubmitted: vi.fn(),
+    };
+
+    await client.resumeSession('resumed-session-hooks', { hooks });
+
+    expect(mockSession.registerHooks).toHaveBeenCalledOnce();
+    expect(mockSession.registerHooks).toHaveBeenCalledWith(hooks);
   });
 });
 

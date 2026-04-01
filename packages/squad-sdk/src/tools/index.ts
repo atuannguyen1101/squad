@@ -13,7 +13,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { SquadTool, SquadToolResult } from '../adapter/types.js';
+import type { SquadTool, SquadToolInvocation, SquadToolResult } from '../adapter/types.js';
+import { getBuiltInActor } from '../agents/built-in-actors.js';
+import type { HandoffStore, HandoffKind, HandoffConfidence } from '../handoff/index.js';
 import { createPulse, filterPulseForUser, type PulseFilter } from '../pulse/index.js';
 import type { Scratchpad } from '../scratchpad/index.js';
 import { trace, SpanStatusCode } from '../runtime/otel-api.js';
@@ -58,6 +60,10 @@ export interface RouteRequest {
   priority?: 'low' | 'normal' | 'high' | 'critical';
   /** Context to pass to the target session */
   context?: string;
+  /** Structured handoff IDs the target agent should read before starting */
+  handoffIds?: string[];
+  /** Scratchpad artifact keys the target agent should review before starting */
+  artifactKeys?: string[];
 }
 
 export interface DecisionRecord {
@@ -85,8 +91,33 @@ export interface StatusQuery {
   agentName?: string;
   /** Filter by session status */
   status?: string;
+  /** Inspect a specific run by runId */
+  runId?: string;
   /** Include detailed session metadata */
   verbose?: boolean;
+}
+
+export interface RunSessionSnapshot {
+  agentName: string;
+  sessionId: string;
+  messageCount: number;
+  lastMessage?: string;
+}
+
+export interface RunInspectionSnapshot {
+  runId: string;
+  sessions: RunSessionSnapshot[];
+  scratchpadEntries: Array<{ key: string; producer: string; valuePreview: string }>;
+  handoffs: Array<{ handoffId: string; fromAgent: string; toAgent?: string; kind: string; summary: string; artifactKeys: string[] }>;
+  communicationEvents: Array<{ summary: string; type: string; agentName?: string }>;
+}
+
+export interface ToolCallEventRecord {
+  toolName: string;
+  sessionId?: string;
+  agentName?: string;
+  runId?: string;
+  details?: Record<string, unknown>;
 }
 
 export interface SkillRequest {
@@ -133,6 +164,36 @@ export interface ScratchpadListRequest {
   producer?: string;
   /** Filter by tag */
   tag?: string;
+}
+
+export interface PublishHandoffRequest {
+  fromAgent?: string;
+  toAgent?: string;
+  kind: HandoffKind;
+  summary: string;
+  details: string;
+  artifactKeys?: string[];
+  blockers?: string[];
+  questions?: string[];
+  confidence?: HandoffConfidence;
+  tags?: string[];
+}
+
+export interface ReadHandoffRequest {
+  handoffId: string;
+}
+
+export interface ListHandoffsRequest {
+  fromAgent?: string;
+  toAgent?: string;
+  kind?: HandoffKind;
+  tag?: string;
+  includeBroadcast?: boolean;
+}
+
+export interface SessionToolContext {
+  agentName: string;
+  runId?: string;
 }
 
 // --- Proposal Types ---
@@ -188,7 +249,7 @@ export function defineTool<TArgs = unknown>(config: {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
-  handler: (args: TArgs) => Promise<SquadToolResult> | SquadToolResult;
+  handler: (args: TArgs, invocation: SquadToolInvocation) => Promise<SquadToolResult> | SquadToolResult;
   /** Optional agent name for span attribution */
   agentName?: string;
 }): SquadTool<TArgs> {
@@ -198,17 +259,19 @@ export function defineTool<TArgs = unknown>(config: {
     parameters: config.parameters,
     // TODO: Parent span context propagation — tool spans should be children of
     // agent.work spans once the agent work span lifecycle is complete.
-    handler: async (args: TArgs) => {
+    handler: async (args: TArgs, invocation: SquadToolInvocation) => {
       const span = tracer.startSpan('squad.tool.call', {
         attributes: {
           'tool.name': config.name,
           ...(config.agentName ? { 'agent.name': config.agentName } : {}),
+          ...(invocation?.sessionId ? { 'session.id': invocation.sessionId } : {}),
+          ...(invocation?.toolCallId ? { 'tool.call_id': invocation.toolCallId } : {}),
           'tool.args': sanitizeArgs(args),
         },
       });
       const startTime = Date.now();
       try {
-        const result = await config.handler(args);
+        const result = await config.handler(args, invocation);
         const durationMs = Date.now() - startTime;
         const resultType = typeof result === 'string' ? 'unknown' : (result.resultType ?? 'unknown');
         const resultText = typeof result === 'string' ? result : (result.textResultForLlm ?? '');
@@ -242,20 +305,32 @@ export class ToolRegistry {
   private tools: Map<string, SquadTool<any>> = new Map();
   private squadRoot: string;
   private sessionPoolGetter?: () => any;
-  private dispatchGetter?: () => ((agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string }>) | undefined;
-  private sendFollowUpGetter?: () => ((agentName: string, message: string) => Promise<string | null>) | undefined;
-  private getMessagesGetter?: () => ((agentName: string) => { role: string; content: string; timestamp: string }[]) | undefined;
+  private dispatchGetter?: () => ((agentName: string, task: string, context?: string, runId?: string) => Promise<{ sessionId: string; status: string }>) | undefined;
+  private sendFollowUpGetter?: () => ((agentName: string, message: string, runId?: string, sourceAgent?: string) => Promise<string | null>) | undefined;
+  private getMessagesGetter?: () => ((agentName: string, runId?: string) => { role: string; content: string; timestamp: string }[]) | undefined;
   private pulseRecordGetter?: () => ((pulse: PulseRequest) => PulseFilter) | undefined;
   private scratchpadGetter?: () => Scratchpad | null;
+  private sessionContextGetter?: () => ((sessionId: string) => SessionToolContext | null) | undefined;
+  private runScratchpadGetter?: () => ((runId?: string) => Scratchpad | null) | undefined;
+  private runHandoffStoreGetter?: () => ((runId?: string) => HandoffStore | null) | undefined;
+  private listSessionsForRunGetter?: () => ((runId: string) => Array<{ agentName: string; sessionId: string }>) | undefined;
+  private toolEventRecorderGetter?: () => ((event: ToolCallEventRecord) => Promise<void> | void) | undefined;
+  private runEventsGetter?: () => ((runId: string) => Array<{ summary: string; type: string; agentName?: string }>) | undefined;
 
   constructor(
     squadRoot = '.squad',
     sessionPoolGetter?: () => any,
-    dispatchGetter?: () => ((agentName: string, task: string, context?: string) => Promise<{ sessionId: string; status: string }>) | undefined,
-    sendFollowUpGetter?: () => ((agentName: string, message: string) => Promise<string | null>) | undefined,
-    getMessagesGetter?: () => ((agentName: string) => { role: string; content: string; timestamp: string }[]) | undefined,
+    dispatchGetter?: () => ((agentName: string, task: string, context?: string, runId?: string) => Promise<{ sessionId: string; status: string }>) | undefined,
+    sendFollowUpGetter?: () => ((agentName: string, message: string, runId?: string, sourceAgent?: string) => Promise<string | null>) | undefined,
+    getMessagesGetter?: () => ((agentName: string, runId?: string) => { role: string; content: string; timestamp: string }[]) | undefined,
     pulseRecordGetter?: () => ((pulse: PulseRequest) => PulseFilter) | undefined,
     scratchpadGetter?: () => Scratchpad | null,
+    sessionContextGetter?: () => ((sessionId: string) => SessionToolContext | null) | undefined,
+    runScratchpadGetter?: () => ((runId?: string) => Scratchpad | null) | undefined,
+    runHandoffStoreGetter?: () => ((runId?: string) => HandoffStore | null) | undefined,
+    listSessionsForRunGetter?: () => ((runId: string) => Array<{ agentName: string; sessionId: string }>) | undefined,
+    toolEventRecorderGetter?: () => ((event: ToolCallEventRecord) => Promise<void> | void) | undefined,
+    runEventsGetter?: () => ((runId: string) => Array<{ summary: string; type: string; agentName?: string }>) | undefined,
   ) {
     this.squadRoot = squadRoot;
     this.sessionPoolGetter = sessionPoolGetter;
@@ -264,7 +339,154 @@ export class ToolRegistry {
     this.getMessagesGetter = getMessagesGetter;
     this.pulseRecordGetter = pulseRecordGetter;
     this.scratchpadGetter = scratchpadGetter;
+    this.sessionContextGetter = sessionContextGetter;
+    this.runScratchpadGetter = runScratchpadGetter;
+    this.runHandoffStoreGetter = runHandoffStoreGetter;
+    this.listSessionsForRunGetter = listSessionsForRunGetter;
+    this.toolEventRecorderGetter = toolEventRecorderGetter;
+    this.runEventsGetter = runEventsGetter;
     this.registerSquadTools();
+  }
+
+  private resolveSessionContext(invocation?: SquadToolInvocation): SessionToolContext | undefined {
+    const getContext = this.sessionContextGetter?.();
+    if (!getContext || !invocation?.sessionId) {
+      return undefined;
+    }
+
+    return getContext(invocation.sessionId) ?? undefined;
+  }
+
+  private resolveScratchpad(invocation?: SquadToolInvocation): Scratchpad | null {
+    const runId = this.resolveSessionContext(invocation)?.runId;
+    const getRunScratchpad = this.runScratchpadGetter?.();
+    if (getRunScratchpad) {
+      const pad = getRunScratchpad(runId);
+      if (pad) {
+        return pad;
+      }
+    }
+
+    return this.scratchpadGetter?.() ?? null;
+  }
+
+  private resolveHandoffStore(invocation?: SquadToolInvocation): HandoffStore | null {
+    const runId = this.resolveSessionContext(invocation)?.runId;
+    const getStore = this.runHandoffStoreGetter?.();
+    if (!getStore) {
+      return null;
+    }
+
+    return getStore(runId) ?? null;
+  }
+
+  private canInspectRun(invocation: SquadToolInvocation | undefined, targetRunId: string): boolean {
+    const sourceContext = this.resolveSessionContext(invocation);
+    if (!sourceContext) {
+      return false;
+    }
+
+    if (sourceContext.runId === targetRunId) {
+      return true;
+    }
+
+    return !!getBuiltInActor(sourceContext.agentName);
+  }
+
+  private inspectRun(runId: string): RunInspectionSnapshot | null {
+    const listSessions = this.listSessionsForRunGetter?.();
+    const getMessages = this.getMessagesGetter?.();
+    if (!listSessions || !getMessages) {
+      return null;
+    }
+
+    const sessions = listSessions(runId).map((session) => {
+      const messages = getMessages(session.agentName, runId);
+      const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant');
+      return {
+        agentName: session.agentName,
+        sessionId: session.sessionId,
+        messageCount: messages.length,
+        lastMessage: lastAssistant?.content,
+      };
+    });
+
+    const scratchpad = this.runScratchpadGetter?.()?.(runId);
+    const scratchpadEntries = scratchpad
+      ? scratchpad.list().map((entry) => ({
+          key: entry.key,
+          producer: entry.producer,
+          valuePreview: entry.value.length > 120 ? `${entry.value.slice(0, 120)}...` : entry.value,
+        }))
+      : [];
+
+    const handoffStore = this.runHandoffStoreGetter?.()?.(runId);
+    const handoffs = handoffStore
+      ? handoffStore.list().map((entry) => ({
+          handoffId: entry.handoffId,
+          fromAgent: entry.fromAgent,
+          toAgent: entry.toAgent,
+          kind: entry.kind,
+          summary: entry.summary,
+          artifactKeys: [...entry.artifactKeys],
+        }))
+      : [];
+
+    const communicationEvents = this.runEventsGetter?.()?.(runId) ?? [];
+
+    return {
+      runId,
+      sessions,
+      scratchpadEntries,
+      handoffs,
+      communicationEvents,
+    };
+  }
+
+  private async recordToolEvent(
+    toolName: string,
+    invocation: SquadToolInvocation | undefined,
+    details: Record<string, unknown> = {},
+  ): Promise<void> {
+    const recordEvent = this.toolEventRecorderGetter?.();
+    if (!recordEvent) {
+      return;
+    }
+
+    const sourceContext = this.resolveSessionContext(invocation);
+    try {
+      await recordEvent({
+        toolName,
+        sessionId: invocation?.sessionId,
+        agentName: sourceContext?.agentName,
+        runId: sourceContext?.runId,
+        details,
+      });
+    } catch {
+      // Observability must not break tool execution.
+    }
+  }
+
+  private formatRouteContext(args: RouteRequest): string | undefined {
+    const extraSections: string[] = [];
+
+    if (args.handoffIds && args.handoffIds.length > 0) {
+      extraSections.push([
+        'Structured handoff IDs:',
+        ...args.handoffIds.map((handoffId) => `- ${handoffId}`),
+        'Read these with squad_read_handoff before starting work.',
+      ].join('\n'));
+    }
+
+    if (args.artifactKeys && args.artifactKeys.length > 0) {
+      extraSections.push([
+        'Referenced scratchpad artifact keys:',
+        ...args.artifactKeys.map((artifactKey) => `- ${artifactKey}`),
+        'Read these with squad_scratchpad_read before starting work.',
+      ].join('\n'));
+    }
+
+    return [args.context, ...extraSections].filter(Boolean).join('\n\n') || undefined;
   }
 
   private registerSquadTools(): void {
@@ -293,10 +515,20 @@ export class ToolRegistry {
             type: 'string',
             description: 'Additional context to pass to the target session',
           },
+          handoffIds: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Structured handoff IDs the target agent should read before starting',
+          },
+          artifactKeys: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Scratchpad artifact keys the target agent should review before starting',
+          },
         },
         required: ['targetAgent', 'task'],
       },
-      handler: async (args) => {
+      handler: async (args, invocation) => {
         if (!args.targetAgent || args.targetAgent.trim() === '') {
           return {
             textResultForLlm: 'Error: Target agent name is required',
@@ -333,14 +565,31 @@ export class ToolRegistry {
         }
 
         try {
-          const result = await dispatch(args.targetAgent, args.task, args.context);
+          const sourceContext = this.resolveSessionContext(invocation);
+          const routeContext = this.formatRouteContext(args);
+          const result = sourceContext?.runId
+            ? await dispatch(args.targetAgent, args.task, routeContext, sourceContext.runId)
+            : await dispatch(args.targetAgent, args.task, routeContext);
+          await this.recordToolEvent('squad_route', invocation, {
+            targetAgent: args.targetAgent,
+            handoffIds: args.handoffIds ?? [],
+            artifactKeys: args.artifactKeys ?? [],
+            priority: args.priority || 'normal',
+          });
           return {
             textResultForLlm: `Task routed to ${args.targetAgent} (session: ${result.sessionId}). Status: ${result.status}. Priority: ${args.priority || 'normal'}.`,
             resultType: 'success',
             toolTelemetry: {
-              routeRequest: { targetAgent: args.targetAgent, task: args.task, priority: args.priority || 'normal' },
+              routeRequest: {
+                targetAgent: args.targetAgent,
+                task: args.task,
+                priority: args.priority || 'normal',
+                handoffIds: args.handoffIds ?? [],
+                artifactKeys: args.artifactKeys ?? [],
+              },
               sessionId: result.sessionId,
               status: result.status,
+              sourceRunId: sourceContext?.runId,
             },
           };
         } catch (error) {
@@ -517,7 +766,73 @@ export class ToolRegistry {
           },
         },
       },
-      handler: async (args) => {
+      handler: async (args, invocation) => {
+        if (args.runId) {
+          if (!this.canInspectRun(invocation, args.runId)) {
+            return {
+              textResultForLlm: `Cross-run inspection is restricted. Agent may only inspect its own run unless it is a built-in actor.`,
+              resultType: 'failure',
+              error: 'Cross-run inspection is restricted',
+            };
+          }
+
+          const snapshot = this.inspectRun(args.runId);
+          if (!snapshot) {
+            return {
+              textResultForLlm: `Run inspection is unavailable — server inspection hooks are not connected.`,
+              resultType: 'failure',
+              error: 'Run inspection unavailable',
+            };
+          }
+
+          if (snapshot.sessions.length === 0 && snapshot.scratchpadEntries.length === 0 && snapshot.handoffs.length === 0) {
+            return {
+              textResultForLlm: `Run ${args.runId}: no active sessions, scratchpad entries, or handoffs found.`,
+              resultType: 'success',
+              toolTelemetry: { runId: args.runId, inspected: true },
+            };
+          }
+
+          const sessionLines = snapshot.sessions.length > 0
+            ? snapshot.sessions.map((session) => {
+                const detail = args.verbose && session.lastMessage
+                  ? `\n    last assistant message: ${session.lastMessage.slice(0, 240)}`
+                  : '';
+                return `- ${session.agentName} (${session.sessionId.slice(0, 8)}): ${session.messageCount} messages${detail}`;
+              }).join('\n')
+            : '- none';
+
+          const scratchpadLines = snapshot.scratchpadEntries.length > 0
+            ? snapshot.scratchpadEntries.map((entry) => `- ${entry.key} by ${entry.producer}: ${entry.valuePreview}`).join('\n')
+            : '- none';
+
+          const handoffLines = snapshot.handoffs.length > 0
+            ? snapshot.handoffs.map((handoff) => `- ${handoff.handoffId} [${handoff.kind}] ${handoff.fromAgent} -> ${handoff.toAgent ?? 'broadcast'}: ${handoff.summary}${handoff.artifactKeys.length > 0 ? ` (artifacts: ${handoff.artifactKeys.join(', ')})` : ''}`).join('\n')
+            : '- none';
+
+          const communicationLines = snapshot.communicationEvents.length > 0
+            ? snapshot.communicationEvents.map((event) => `- ${event.summary}`).join('\n')
+            : '- none';
+
+          return {
+            textResultForLlm: [
+              `Run ${snapshot.runId} inspection:`,
+              `Sessions:\n${sessionLines}`,
+              `Scratchpad:\n${scratchpadLines}`,
+              `Handoffs:\n${handoffLines}`,
+              `Communication trace:\n${communicationLines}`,
+            ].join('\n\n'),
+            resultType: 'success',
+            toolTelemetry: {
+              runId: snapshot.runId,
+              sessions: snapshot.sessions.length,
+              scratchpadEntries: snapshot.scratchpadEntries.length,
+              handoffs: snapshot.handoffs.length,
+              communicationEvents: snapshot.communicationEvents.length,
+            },
+          };
+        }
+
         const pool = this.sessionPoolGetter?.();
         const hasServer = !!this.dispatchGetter?.();
 
@@ -709,7 +1024,7 @@ export class ToolRegistry {
         },
         required: ['agentName', 'message'],
       },
-      handler: async (args) => {
+      handler: async (args, invocation) => {
         const sendFn = this.sendFollowUpGetter?.();
         if (!sendFn) {
           return {
@@ -719,7 +1034,14 @@ export class ToolRegistry {
           };
         }
         try {
-          const response = await sendFn(args.agentName, args.message);
+          const sourceContext = this.resolveSessionContext(invocation);
+          const response = sourceContext?.runId
+            ? await sendFn(args.agentName, args.message, sourceContext.runId, sourceContext.agentName)
+            : await sendFn(args.agentName, args.message, undefined, sourceContext?.agentName);
+          await this.recordToolEvent('squad_send', invocation, {
+            targetAgent: args.agentName,
+            responseCaptured: response != null,
+          });
           if (response) {
             return { textResultForLlm: response, resultType: 'success' };
           }
@@ -749,7 +1071,7 @@ export class ToolRegistry {
         },
         required: ['agentName'],
       },
-      handler: async (args) => {
+      handler: async (args, invocation) => {
         const getMsgsFn = this.getMessagesGetter?.();
         if (!getMsgsFn) {
           return {
@@ -759,7 +1081,14 @@ export class ToolRegistry {
           };
         }
         try {
-          const messages = getMsgsFn(args.agentName);
+          const sourceContext = this.resolveSessionContext(invocation);
+          const messages = sourceContext?.runId
+            ? getMsgsFn(args.agentName, sourceContext.runId)
+            : getMsgsFn(args.agentName);
+          await this.recordToolEvent('squad_read_session', invocation, {
+            targetAgent: args.agentName,
+            messageCount: messages.length,
+          });
           if (messages.length === 0) {
             return {
               textResultForLlm: `No messages found for ${args.agentName}. Agent may not have an active session.`,
@@ -845,8 +1174,8 @@ export class ToolRegistry {
         },
         required: ['key', 'value', 'producer'],
       },
-      handler: async (args) => {
-        const pad = this.scratchpadGetter?.();
+      handler: async (args, invocation) => {
+        const pad = this.resolveScratchpad(invocation);
         if (!pad) {
           return {
             textResultForLlm: 'Scratchpad not available — server not connected.',
@@ -855,6 +1184,11 @@ export class ToolRegistry {
           };
         }
         const result = pad.write(args.key, args.value, args.producer, args.tags ?? []);
+        await this.recordToolEvent('squad_scratchpad_write', invocation, {
+          key: args.key,
+          producer: args.producer,
+          created: result.created,
+        });
         if (!result.success) {
           return {
             textResultForLlm: `Scratchpad write failed: ${result.error}`,
@@ -881,8 +1215,8 @@ export class ToolRegistry {
         },
         required: ['key'],
       },
-      handler: async (args) => {
-        const pad = this.scratchpadGetter?.();
+      handler: async (args, invocation) => {
+        const pad = this.resolveScratchpad(invocation);
         if (!pad) {
           return {
             textResultForLlm: 'Scratchpad not available — server not connected.',
@@ -891,6 +1225,10 @@ export class ToolRegistry {
           };
         }
         const entry = pad.read(args.key);
+        await this.recordToolEvent('squad_scratchpad_read', invocation, {
+          key: args.key,
+          found: !!entry,
+        });
         if (!entry) {
           return {
             textResultForLlm: `Scratchpad: key "${args.key}" not found.`,
@@ -916,8 +1254,8 @@ export class ToolRegistry {
           tag: { type: 'string', description: 'Filter by tag' },
         },
       },
-      handler: async (args) => {
-        const pad = this.scratchpadGetter?.();
+      handler: async (args, invocation) => {
+        const pad = this.resolveScratchpad(invocation);
         if (!pad) {
           return {
             textResultForLlm: 'Scratchpad not available — server not connected.',
@@ -926,6 +1264,11 @@ export class ToolRegistry {
           };
         }
         const entries = pad.list(args);
+        await this.recordToolEvent('squad_scratchpad_list', invocation, {
+          producer: args.producer ?? null,
+          tag: args.tag ?? null,
+          count: entries.length,
+        });
         if (entries.length === 0) {
           const filterDesc = args.producer || args.tag
             ? ` (filter: ${[args.producer && `producer=${args.producer}`, args.tag && `tag=${args.tag}`].filter(Boolean).join(', ')})`
@@ -946,6 +1289,205 @@ export class ToolRegistry {
       },
     });
     this.tools.set('squad_scratchpad_list', squadScratchpadList);
+
+    const squadPublishHandoff = defineTool<PublishHandoffRequest>({
+      name: 'squad_publish_handoff',
+      description: 'Publish a structured handoff for another agent in the same run. Use this instead of burying results in freeform chat when another agent needs your output.',
+      parameters: {
+        type: 'object',
+        properties: {
+          fromAgent: { type: 'string', description: 'Optional override for the publishing agent. Defaults to the caller session agent.' },
+          toAgent: { type: 'string', description: 'Optional target agent. Omit for broadcast handoffs.' },
+          kind: {
+            type: 'string',
+            enum: ['analysis', 'patch', 'review', 'test-result', 'question', 'artifact', 'summary'],
+            description: 'Type of handoff payload',
+          },
+          summary: { type: 'string', description: 'One-screen summary of the handoff' },
+          details: { type: 'string', description: 'Full handoff details for the target agent' },
+          artifactKeys: { type: 'array', items: { type: 'string' }, description: 'Scratchpad artifact keys referenced by this handoff' },
+          blockers: { type: 'array', items: { type: 'string' }, description: 'Outstanding blockers' },
+          questions: { type: 'array', items: { type: 'string' }, description: 'Open questions for the consumer' },
+          confidence: { type: 'string', enum: ['low', 'medium', 'high'], description: 'Publisher confidence in the handoff' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Optional tags for filtering' },
+        },
+        required: ['kind', 'summary', 'details'],
+      },
+      handler: async (args, invocation) => {
+        const store = this.resolveHandoffStore(invocation);
+        if (!store) {
+          return {
+            textResultForLlm: 'Handoff store not available — server not connected.',
+            resultType: 'failure' as const,
+            error: 'No handoff store available',
+          };
+        }
+
+        const sourceContext = this.resolveSessionContext(invocation);
+        const fromAgent = sourceContext?.agentName ?? args.fromAgent;
+        if (!fromAgent) {
+          return {
+            textResultForLlm: 'Handoff publish failed: source agent could not be resolved.',
+            resultType: 'failure' as const,
+            error: 'Missing source agent',
+          };
+        }
+
+        const entry = store.publish({
+          runId: sourceContext?.runId,
+          fromAgent,
+          toAgent: args.toAgent,
+          kind: args.kind,
+          summary: args.summary,
+          details: args.details,
+          artifactKeys: args.artifactKeys,
+          blockers: args.blockers,
+          questions: args.questions,
+          confidence: args.confidence,
+          tags: args.tags,
+        });
+
+        const target = entry.toAgent ? ` to ${entry.toAgent}` : ' (broadcast)';
+        await this.recordToolEvent('squad_publish_handoff', invocation, {
+          handoffId: entry.handoffId,
+          toAgent: entry.toAgent ?? null,
+          kind: entry.kind,
+          artifactKeys: entry.artifactKeys,
+        });
+        return {
+          textResultForLlm: `Published handoff ${entry.handoffId} (${entry.kind}) from ${entry.fromAgent}${target}. Summary: ${entry.summary}`,
+          resultType: 'success' as const,
+          toolTelemetry: {
+            handoffId: entry.handoffId,
+            kind: entry.kind,
+            fromAgent: entry.fromAgent,
+            toAgent: entry.toAgent ?? null,
+            runId: entry.runId ?? null,
+          },
+        };
+      },
+    });
+    this.tools.set('squad_publish_handoff', squadPublishHandoff);
+
+    const squadReadHandoff = defineTool<ReadHandoffRequest>({
+      name: 'squad_read_handoff',
+      description: 'Read a structured handoff by ID. Use this before starting work when another agent routed you a handoff.',
+      parameters: {
+        type: 'object',
+        properties: {
+          handoffId: { type: 'string', description: 'Handoff ID to read' },
+        },
+        required: ['handoffId'],
+      },
+      handler: async (args, invocation) => {
+        const store = this.resolveHandoffStore(invocation);
+        if (!store) {
+          return {
+            textResultForLlm: 'Handoff store not available — server not connected.',
+            resultType: 'failure' as const,
+            error: 'No handoff store available',
+          };
+        }
+
+        const entry = store.read(args.handoffId);
+        await this.recordToolEvent('squad_read_handoff', invocation, {
+          handoffId: args.handoffId,
+          found: !!entry,
+        });
+        if (!entry) {
+          return {
+            textResultForLlm: `Handoff ${args.handoffId} not found.`,
+            resultType: 'success' as const,
+          };
+        }
+
+        const sections = [
+          `Handoff ${entry.handoffId}`,
+          `From: ${entry.fromAgent}`,
+          `To: ${entry.toAgent ?? 'broadcast'}`,
+          `Kind: ${entry.kind}`,
+          `Confidence: ${entry.confidence}`,
+          `Summary: ${entry.summary}`,
+          '',
+          entry.details,
+        ];
+        if (entry.artifactKeys.length > 0) {
+          sections.push('', 'Artifact keys:', ...entry.artifactKeys.map((artifactKey) => `- ${artifactKey}`));
+        }
+        if (entry.blockers.length > 0) {
+          sections.push('', 'Blockers:', ...entry.blockers.map((blocker) => `- ${blocker}`));
+        }
+        if (entry.questions.length > 0) {
+          sections.push('', 'Questions:', ...entry.questions.map((question) => `- ${question}`));
+        }
+
+        return {
+          textResultForLlm: sections.join('\n'),
+          resultType: 'success' as const,
+          toolTelemetry: {
+            handoffId: entry.handoffId,
+            kind: entry.kind,
+            fromAgent: entry.fromAgent,
+            toAgent: entry.toAgent ?? null,
+          },
+        };
+      },
+    });
+    this.tools.set('squad_read_handoff', squadReadHandoff);
+
+    const squadListHandoffs = defineTool<ListHandoffsRequest>({
+      name: 'squad_list_handoffs',
+      description: 'List structured handoffs in the current run. Use filters to see only your inbox or a specific kind of handoff.',
+      parameters: {
+        type: 'object',
+        properties: {
+          fromAgent: { type: 'string', description: 'Filter by publishing agent' },
+          toAgent: { type: 'string', description: 'Filter by target agent' },
+          kind: {
+            type: 'string',
+            enum: ['analysis', 'patch', 'review', 'test-result', 'question', 'artifact', 'summary'],
+            description: 'Filter by handoff kind',
+          },
+          tag: { type: 'string', description: 'Filter by tag' },
+          includeBroadcast: { type: 'boolean', description: 'When filtering by toAgent, also include broadcast handoffs', default: true },
+        },
+      },
+      handler: async (args, invocation) => {
+        const store = this.resolveHandoffStore(invocation);
+        if (!store) {
+          return {
+            textResultForLlm: 'Handoff store not available — server not connected.',
+            resultType: 'failure' as const,
+            error: 'No handoff store available',
+          };
+        }
+
+        const entries = store.list(args);
+        await this.recordToolEvent('squad_list_handoffs', invocation, {
+          fromAgent: args.fromAgent ?? null,
+          toAgent: args.toAgent ?? null,
+          kind: args.kind ?? null,
+          count: entries.length,
+        });
+        if (entries.length === 0) {
+          return {
+            textResultForLlm: 'No handoffs found for the current run and filters.',
+            resultType: 'success' as const,
+          };
+        }
+
+        const listing = entries.map((entry) => {
+          const target = entry.toAgent ?? 'broadcast';
+          return `- ${entry.handoffId} [${entry.kind}] ${entry.fromAgent} -> ${target}: ${entry.summary}`;
+        }).join('\n');
+
+        return {
+          textResultForLlm: `Handoffs (${entries.length}):\n${listing}`,
+          resultType: 'success' as const,
+        };
+      },
+    });
+    this.tools.set('squad_list_handoffs', squadListHandoffs);
 
     // squad_proposals: Manage improvement proposals from Sage
     const squadProposals = defineTool<ProposalActionRequest>({

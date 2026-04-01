@@ -182,6 +182,38 @@ describe('PipelineRunner', () => {
       expect(state.phaseResults.get('check')?.error).toContain('Gate failed');
     });
 
+    it('uses a gate-specific retry prompt after gate failure', async () => {
+      const dispatch = vi.fn()
+        .mockResolvedValueOnce({ sessionId: 'test-session', status: 'success', agentName: 'hockney', response: 'Still waiting on the implementer.' })
+        .mockResolvedValueOnce({ sessionId: 'test-session', status: 'success', agentName: 'hockney', response: 'APPROVED: Final verification complete.' });
+
+      const runner = new PipelineRunner(
+        {
+          id: 'gate-retry',
+          name: 'Gate Retry',
+          phases: [{
+            id: 'review',
+            agent: 'hockney',
+            task: 'Review the implementation',
+            retries: 2,
+            gate: {
+              validate: (o: unknown) => typeof o === 'string' && (o as string).startsWith('APPROVED:'),
+              description: 'Reviewer must finish with APPROVED: or BLOCKED:',
+            },
+          }],
+        },
+        makeDeps({ dispatch }),
+      );
+
+      const state = await runner.run();
+
+      expect(state.status).toBe('completed');
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect(dispatch.mock.calls[1]?.[1]).toContain('did not satisfy the phase completion gate');
+      expect(dispatch.mock.calls[1]?.[1]).toContain('Reviewer must finish with APPROVED: or BLOCKED:');
+      expect(dispatch.mock.calls[1]?.[1]).not.toContain('response-checklist');
+    });
+
     it('should skip downstream phases when a dependency fails', async () => {
       const deps = makeDeps({
         waitForResponse: vi.fn()

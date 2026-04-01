@@ -34,6 +34,13 @@ export class MCPServer {
     this.tools.set(definition.name, { definition, handler });
   }
 
+  private _onCloseCallbacks: Array<() => void> = [];
+
+  /** Register a callback to run when the MCP connection closes */
+  onClose(callback: () => void): void {
+    this._onCloseCallbacks.push(callback);
+  }
+
   /** Start the stdio JSON-RPC loop */
   async start(): Promise<void> {
     const rl = readline.createInterface({ input: process.stdin });
@@ -60,6 +67,9 @@ export class MCPServer {
     });
 
     rl.on('close', () => {
+      for (const cb of this._onCloseCallbacks) {
+        try { cb(); } catch { /* ignore shutdown errors */ }
+      }
       process.exit(0);
     });
   }

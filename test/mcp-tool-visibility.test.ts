@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MCPServer } from '../packages/squad-sdk/src/mcp/protocol.js';
+import { DEFAULT_PUBLIC_TOOLS, INTERNAL_TOOLS } from '../packages/squad-sdk/src/mcp/server.js';
 import type { SquadConfig } from '../packages/squad-sdk/src/runtime/config.js';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
@@ -75,16 +76,9 @@ describe('MCP Tool Visibility', () => {
       return originalAddTool(schema, handler);
     };
 
-    // The actual server registration happens in server.ts
-    // We'll verify by checking the source code pattern
     expect(expectedTools).toHaveLength(7);
-    expect(expectedTools).toContain('squad_run');
-    expect(expectedTools).toContain('squad_ask');
-    expect(expectedTools).toContain('squad_respond');
-    expect(expectedTools).toContain('squad_wait');
-    expect(expectedTools).toContain('squad_status');
-    expect(expectedTools).toContain('squad_cancel');
-    expect(expectedTools).toContain('squad_analyze_run');
+    expect(Array.from(DEFAULT_PUBLIC_TOOLS)).toEqual(expect.arrayContaining(expectedTools));
+    expect(DEFAULT_PUBLIC_TOOLS.size).toBe(7);
   });
 
   it('should NOT expose internal tools on MCP surface', () => {
@@ -104,9 +98,9 @@ describe('MCP Tool Visibility', () => {
       'squad_wait_for_idle',
     ];
 
-    // These tools are wrapped in `if (false)` blocks in server.ts
-    // so they are never registered on the MCP surface
     expect(internalTools).toHaveLength(12);
+    expect(Array.from(INTERNAL_TOOLS)).toEqual(expect.arrayContaining(internalTools));
+    expect(INTERNAL_TOOLS.size).toBe(12);
     
     // Verify that each internal tool is documented
     internalTools.forEach(toolName => {
@@ -154,12 +148,8 @@ describe('MCP Tool Visibility', () => {
       );
       expect(toolSection).toContain('registerTool(');
       
-      // Verify it IS in the publicTools Set
-      const publicToolsSection = serverSource.substring(
-        serverSource.indexOf('const publicTools = new Set(['),
-        serverSource.indexOf('const publicTools = new Set([') + 300,
-      );
-      expect(publicToolsSection).toContain(`'${toolName}'`);
+      // Verify the tool is present in the exported public tool set
+      expect(DEFAULT_PUBLIC_TOOLS.has(toolName as any)).toBe(true);
     });
 
     // Verify internal tools are registered with registerTool (not in publicTools Set)
@@ -195,17 +185,15 @@ describe('MCP Tool Visibility', () => {
       // Should have [INTERNAL - Not exposed on MCP] marker
       expect(toolSection).toContain('[INTERNAL - Not exposed on MCP]');
       
-      // Should use registerTool (which checks publicTools Set)
+      // Should use registerTool (which checks the publicTools set)
       expect(toolSection).toContain('registerTool(');
       
-      // Should NOT be in the publicTools Set
-      expect(serverSource).toContain('const publicTools = new Set([');
-      const publicToolsSection = serverSource.substring(
-        serverSource.indexOf('const publicTools = new Set(['),
-        serverSource.indexOf('const publicTools = new Set([') + 300,
-      );
-      expect(publicToolsSection).not.toContain(`'${toolName}'`);
+      // Should NOT be in the exported public tool set
+      expect(DEFAULT_PUBLIC_TOOLS.has(toolName as any)).toBe(false);
+      expect(INTERNAL_TOOLS.has(toolName as any)).toBe(true);
     });
+
+    expect(serverSource).toContain('const publicTools = options.publicTools ?? DEFAULT_PUBLIC_TOOLS;');
   });
 
   it('should document the tool visibility strategy in server.ts', () => {

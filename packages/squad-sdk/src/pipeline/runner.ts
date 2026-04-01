@@ -15,8 +15,8 @@ import type {
   PhaseStatus,
 } from './types.js';
 
-const DEFAULT_PHASE_TIMEOUT = 300_000; // 5 minutes
-const DEFAULT_RETRIES = 1;
+const DEFAULT_PHASE_TIMEOUT = 900_000; // 15 minutes
+const DEFAULT_RETRIES = 5;
 
 export class PipelineRunner {
   private definition: PipelineDefinition;
@@ -122,11 +122,23 @@ export class PipelineRunner {
         const contextStr = phase.context
           ? `\n\nContext:\n${JSON.stringify(phase.context, null, 2)}`
           : '';
-        const taskWithTools = phase.allowedTools
-          ? `${phase.task}\n\nYou may only use these tools: ${phase.allowedTools.join(', ')}${contextStr}`
-          : `${phase.task}${contextStr}`;
+        
+        // On retry after gate failure, send a checklist reminder instead of the original task
+        let taskToSend: string;
+        if (attempt > 1 && lastResult?.status === 'failed' && lastResult.error?.includes('Gate failed')) {
+          taskToSend = [
+            'Your previous response did not satisfy the phase completion gate.',
+            `Gate requirement: ${phase.gate.description}`,
+            'Continue from the current session state and finish the phase before replying again.',
+            'Do not stop at in-progress updates like "I asked", "I will wait", or other partial status messages.',
+          ].join('\n');
+        } else {
+          taskToSend = phase.allowedTools
+            ? `${phase.task}\n\nYou may only use these tools: ${phase.allowedTools.join(', ')}${contextStr}`
+            : `${phase.task}${contextStr}`;
+        }
 
-        const dispatchResult = await this.deps.dispatch(phase.agent, taskWithTools);
+        const dispatchResult = await this.deps.dispatch(phase.agent, taskToSend);
         const response = dispatchResult.response ?? await this.deps.waitForResponse(phase.agent, timeout);
 
         const output = response ?? '';
@@ -150,6 +162,11 @@ export class PipelineRunner {
         this.deps.onPhaseComplete?.(lastResult);
 
         if (gatePass) return lastResult;
+        
+        // Notify about gate retry before the next attempt
+        if (attempt < maxAttempts) {
+          this.deps.onPhaseRetry?.(phase.id, phase.agent, attempt, phase.gate.description);
+        }
       } catch (err) {
         const completedAt = new Date();
         lastResult = {
