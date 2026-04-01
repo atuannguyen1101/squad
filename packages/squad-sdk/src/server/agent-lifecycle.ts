@@ -1284,6 +1284,14 @@ You can communicate with other squad members using these tools:
     return this.sessions.size;
   }
 
+  getDispatchStats(): { active: number; queued: number; max: number } {
+    return {
+      active: this.dispatchSemaphore.getActiveCount(),
+      queued: this.dispatchSemaphore.getQueueDepth(),
+      max: this.dispatchSemaphore.getMaxConcurrent(),
+    };
+  }
+
   /**
    * Wait until no session has had activity for `idleMs` milliseconds.
    * Resolves with a summary of what happened. Rejects on timeout.

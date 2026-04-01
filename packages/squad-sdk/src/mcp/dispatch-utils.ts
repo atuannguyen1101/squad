@@ -65,6 +65,10 @@ export class DispatchSemaphore {
   getActiveCount(): number {
     return this.active;
   }
+
+  getMaxConcurrent(): number {
+    return this.maxConcurrent;
+  }
 }
 
 /**

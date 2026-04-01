@@ -179,6 +179,7 @@ export function formatRunStatusSummary(
   activeSessions: ActiveSessionInfo[],
   dashboardUrl: string | null,
   communicationTrace?: string,
+  dispatchStats?: { active: number; queued: number; max: number },
 ): string {
   const runSessions = activeSessions
     .filter((session) => session.runId === context.runId)
@@ -202,11 +203,16 @@ export function formatRunStatusSummary(
     ? context.pendingUserQuestions.map((question, index) => `  ${index + 1}. ${question.question}`).join('\n')
     : '  none';
 
+  const dispatchLine = dispatchStats
+    ? `Dispatch: ${dispatchStats.active}/${dispatchStats.max} active, ${dispatchStats.queued} queued`
+    : null;
+
   return [
     `Run: ${context.runId}`,
     `Status: ${context.status}`,
     `Intent: ${context.initialMessage}`,
     dashboardUrl ? `Dashboard: ${dashboardUrl}` : null,
+    dispatchLine,
     `Active sessions in run:\n${sessionLines}`,
     `Latest pulses:\n${pulseLines}`,
     `Communication trace:\n${communicationTrace ?? '  (none)'}`,
@@ -462,8 +468,10 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           };
         }
 
+        const mgr = server.getSessionManager();
+        const dispatchStats = mgr?.getDispatchStats();
         return {
-          content: [{ type: 'text', text: formatRunStatusSummary(context, status.agents, dashboardUrl, getRunCommunicationTrace(args.runId)) }],
+          content: [{ type: 'text', text: formatRunStatusSummary(context, status.agents, dashboardUrl, getRunCommunicationTrace(args.runId), dispatchStats) }],
         };
       }
 
@@ -1381,7 +1389,7 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
               text: [
                 `Ben session unavailable for run ${context.runId}. Your message was not delivered.`,
                 'Current run status:',
-                formatRunStatusSummary(context, server.getStatus().agents, dashboardUrl, getRunCommunicationTrace(context.runId)),
+                formatRunStatusSummary(context, server.getStatus().agents, dashboardUrl, getRunCommunicationTrace(context.runId), server.getSessionManager()?.getDispatchStats()),
               ].join('\n\n'),
             }],
           };
@@ -1572,12 +1580,15 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           const summaryLines = [...latest.entries()].map(
             ([agent, p]) => `${agent}: ${p.phase} ${p.progressPct}% — ${p.summary}`,
           );
+          const mgr = server.getSessionManager();
+          const ds = mgr?.getDispatchStats();
+          const dispatchInfo = ds ? `\nDispatch: ${ds.active}/${ds.max} active, ${ds.queued} queued` : '';
           return {
             content: [{
               type: 'text',
               text: summaryLines.length > 0
-                ? `No user-relevant events in ${timeoutMs / 1000}s. Current status:\n${summaryLines.join('\n')}`
-                : `No events in ${timeoutMs / 1000}s. Team may still be working. Use squad_status for details.`,
+                ? `No user-relevant events in ${timeoutMs / 1000}s.${dispatchInfo}\nCurrent status:\n${summaryLines.join('\n')}`
+                : `No events in ${timeoutMs / 1000}s.${dispatchInfo}\nTeam may still be working. Use squad_status for details.`,
             }],
           };
         }
