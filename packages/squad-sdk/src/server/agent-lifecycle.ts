@@ -1010,7 +1010,23 @@ You can communicate with other squad members using these tools:
   getMessages(agentName: string, runId?: string): SessionMessage[] {
     const resolved = resolveAgentName(this.squadRoot, agentName).toLowerCase();
     const sessionKey = makeSessionKey(resolved, runId);
-    return this.sessions.get(sessionKey)?.messages ?? [];
+    const exact = this.sessions.get(sessionKey);
+    if (exact) return exact.messages;
+
+    // No exact match — if no runId was provided, find the most recent session for this agent
+    if (!runId) {
+      let best: AgentSessionEntry | undefined;
+      for (const entry of this.sessions.values()) {
+        if (entry.agentName === resolved) {
+          if (!best || entry.lastActiveAt > best.lastActiveAt) {
+            best = entry;
+          }
+        }
+      }
+      if (best) return best.messages;
+    }
+
+    return [];
   }
 
   /**
