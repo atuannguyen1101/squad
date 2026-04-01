@@ -143,6 +143,10 @@ export class PipelineRunner {
 
         const output = response ?? '';
         const gatePass = await Promise.resolve(phase.gate.validate(output));
+        if (!gatePass) {
+          const preview = output.length > 300 ? output.slice(0, 300) + '...' : output;
+          process.stderr.write(`[pipeline] Gate REJECTED for ${phase.agent} (${phase.id}, attempt ${attempt}): response=${JSON.stringify(preview)}\n`);
+        }
         const status: PhaseStatus = gatePass ? 'completed' : 'failed';
         const completedAt = new Date();
 

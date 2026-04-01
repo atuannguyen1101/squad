@@ -1051,11 +1051,17 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
         dispatch: buildPipelineDispatch(),
         waitForResponse,
         onPhaseStart: (phaseId: string, agent: string) => {
-          runContext.pulseCollector.record(createPulse({
-            agent, phase: 'starting', status: 'ok', progressPct: 0,
-            summary: `Phase ${phaseId} starting`, blockers: [], questionsForUser: [],
-            artifacts: [], nextStep: phaseId,
-          }));
+          // Log to event history only — no user-facing pulse.
+          // Per-phase progress causes confusing 0→100→30→0 bouncing in squad_wait.
+          const eventHistory = server.getEventHistory();
+          if (eventHistory) {
+            eventHistory.push({
+              type: 'phase:start',
+              agentName: agent,
+              summary: `Phase ${phaseId} starting for ${agent}`,
+              details: { phaseId, runId },
+            });
+          }
         },
         onPhaseRetry: (phaseId: string, agent: string, attempt: number, gateDescription: string) => {
           const eventHistory = server.getEventHistory();
@@ -1069,25 +1075,22 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           }
         },
         onPhaseComplete: (result) => {
-          // Include agent response in pulse so findings surface through squad_wait
-          const agentResponse = typeof result.output === 'string' && result.output.length > 0
-            ? result.output.slice(0, 500) + (result.output.length > 500 ? '\n...(truncated)' : '')
-            : '';
-          const summary = result.error
-            ? result.error
-            : agentResponse
-              ? `${agentResponse}`
-              : `Phase ${result.phaseId} completed`;
-
-          runContext.pulseCollector.record(createPulse({
-            agent: result.agent,
-            phase: result.status === 'completed' ? 'done' : 'blocked',
-            status: result.status === 'completed' ? 'ok' : 'error',
-            progressPct: result.status === 'completed' ? 100 : 0,
-            summary,
-            blockers: result.error ? [result.error] : [],
-            questionsForUser: [], artifacts: [], nextStep: '',
-          }));
+          // Log to event history only — no user-facing pulse for individual phases.
+          // Run-level completion pulse is emitted after the full impl+review pipeline.
+          const eventHistory = server.getEventHistory();
+          if (eventHistory) {
+            const agentResponse = typeof result.output === 'string' && result.output.length > 0
+              ? result.output.slice(0, 200)
+              : '';
+            eventHistory.push({
+              type: result.status === 'completed' ? 'phase:complete' : 'phase:failed',
+              agentName: result.agent,
+              summary: result.error
+                ? `${result.agent} phase ${result.phaseId} failed: ${result.error}`
+                : `${result.agent} phase ${result.phaseId} completed${agentResponse ? ': ' + agentResponse.slice(0, 100) : ''}`,
+              details: { phaseId: result.phaseId, status: result.status, attempt: result.attempt, runId },
+            });
+          }
 
           // --- Intent Graph updates at key milestones ---
           if (result.status === 'completed' && runContext.intentGraph && typeof result.output === 'string') {
@@ -1103,18 +1106,14 @@ export async function createSquadMCPServer(options: SquadMCPServerOptions): Prom
           }
         },
         onPipelineComplete: (state) => {
-          // Only emit a progress pulse here — this is the understand+route
-          // pipeline, NOT the full run.  The real "done" pulse is emitted
-          // after the impl+review pipeline finishes (see below).
-          runContext.pulseCollector.record(createPulse({
-            agent: 'ben', phase: state.status === 'completed' ? 'implementing' : 'blocked',
-            status: state.status === 'completed' ? 'ok' : 'error',
-            progressPct: state.status === 'completed' ? 30 : 100,
-            summary: state.status === 'completed'
-              ? 'Routing complete. Starting implementation pipeline.'
-              : 'Routing failed. Check phase results.',
-            blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
-          }));
+          // Log routing completion — no percentage-based progress.
+          if (state.status !== 'completed') {
+            runContext.pulseCollector.record(createPulse({
+              agent: 'ben', phase: 'blocked', status: 'error', progressPct: 0,
+              summary: 'Routing failed. Check phase results.',
+              blockers: [], questionsForUser: [], artifacts: [], nextStep: '',
+            }));
+          }
         },
       };
 
